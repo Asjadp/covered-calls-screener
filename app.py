@@ -4,8 +4,8 @@ import plotly.graph_objects as go
 from datetime import datetime
 import os
 
-from screener import screen_covered_calls
-from database import init_db, save_screen_results, load_history, get_db_status
+from screener import screen_covered_calls, resolve_to_symbol
+from database import init_db, save_screen_results, load_history, get_db_status, get_latest_snapshot
 from test_data_pipeline import load_sample_dataset, CSV_EXPORT_PATH, JSON_EXPORT_PATH
 
 st.set_page_config(
@@ -53,7 +53,15 @@ with st.sidebar:
     if use_custom_cost:
         custom_price = st.number_input("Your Purchase Price ($)", min_value=0.01, value=150.0, step=0.50)
 
-    run_button = st.button("Run Live Screener", type="primary")
+    # Data Fetching Mode (Cached Database vs Live Refresh)
+    data_mode = st.radio(
+        "Data Mode",
+        options=["⚡ Fast Database Snapshot", "🔄 Live Market Refresh"],
+        index=0,
+        help="⚡ Fast Database Snapshot loads pre-saved database records instantly without calling yfinance API. 🔄 Live Market Refresh queries live market option chains."
+    )
+
+    run_button = st.button("Run Screener", type="primary")
     
     st.markdown("---")
     st.caption("Developed by **Asjad P.** ([GitHub @asjadp](https://github.com/asjadp))")
@@ -61,25 +69,52 @@ with st.sidebar:
 # ----------------- SESSION STATE & SCREENING EXECUTION -----------------
 last_ticker = st.session_state.get('last_ticker')
 last_price = st.session_state.get('last_price')
+last_mode = st.session_state.get('last_mode')
 
 should_run = (
     run_button or 
     'results' not in st.session_state or 
     ticker_input.upper() != str(last_ticker).upper() or 
-    custom_price != last_price
+    custom_price != last_price or
+    data_mode != last_mode
 )
 
 if should_run and ticker_input:
     st.session_state['last_ticker'] = ticker_input
     st.session_state['last_price'] = custom_price
+    st.session_state['last_mode'] = data_mode
     
-    with st.spinner(f"Fetching real-time option chains and computing Greeks for '{ticker_input}'..."):
-        try:
-            symbol, curr_price, ref_price, earnings_date, results = screen_covered_calls(ticker_input, custom_price)
-            snapshot_id = save_screen_results(symbol, curr_price, ref_price, earnings_date, results)
-            st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id)
-        except Exception as e:
-            st.error(f"Error analyzing '{ticker_input}': {str(e)}")
+    symbol_resolved = resolve_to_symbol(ticker_input)
+    is_live = (data_mode == "🔄 Live Market Refresh")
+    
+    loaded_from_db = False
+    
+    # Try Database Snapshot First if in Cached Mode
+    if not is_live:
+        existing_snapshot = get_latest_snapshot(symbol_resolved)
+        if existing_snapshot:
+            snap_meta, snap_results = existing_snapshot
+            symbol = snap_meta['ticker']
+            curr_price = snap_meta['current_price']
+            ref_price = custom_price if (custom_price and custom_price > 0) else snap_meta['purchase_price']
+            earnings_date = snap_meta.get('earnings_date', 'N/A')
+            results = snap_results
+            snapshot_id = snap_meta['id']
+            snap_time = snap_meta['timestamp']
+            
+            st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "db", snap_time)
+            loaded_from_db = True
+
+    # Otherwise fetch live from yfinance
+    if not loaded_from_db:
+        with st.spinner(f"Fetching real-time option chains for '{ticker_input}' via yfinance..."):
+            try:
+                symbol, curr_price, ref_price, earnings_date, results = screen_covered_calls(ticker_input, custom_price)
+                snapshot_id = save_screen_results(symbol, curr_price, ref_price, earnings_date, results)
+                snap_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "live", snap_time)
+            except Exception as e:
+                st.error(f"Error analyzing '{ticker_input}': {str(e)}")
 
 # ----------------- MAIN DASHBOARD TABS -----------------
 st.title("📈 Covered Call Screener & Yield Engine")
@@ -94,7 +129,12 @@ tab_live, tab_data_testing, tab_methodology = st.tabs([
 # ----------------- TAB 1: LIVE OPTION SCREENER -----------------
 with tab_live:
     if 'results' in st.session_state:
-        symbol, original_input, curr_price, ref_price, earnings_date, results, snapshot_id = st.session_state['results']
+        symbol, original_input, curr_price, ref_price, earnings_date, results, snapshot_id, source, snap_time = st.session_state['results']
+
+        if source == "db":
+            st.info(f"⚡ **Loaded instantly from Database Snapshot** (#{snapshot_id}, saved on `{snap_time}`). No external API calls used.")
+        else:
+            st.success(f"🔄 **Live market data fetched & saved** to database (#{snapshot_id} at `{snap_time}`).")
 
         # Top KPI Metrics Cards
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
@@ -141,7 +181,6 @@ with tab_live:
             display_df.rename(columns=rename_dict, inplace=True)
 
             st.dataframe(display_df, width="stretch")
-            st.success(f"Snapshot recorded in {db_status['label']} (Snapshot ID #{snapshot_id}).")
 
             # CSV Export
             csv_data = display_df.to_csv(index=False).encode('utf-8')

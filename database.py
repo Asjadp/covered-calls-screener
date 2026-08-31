@@ -299,3 +299,65 @@ def load_history(ticker: Optional[str] = None) -> pd.DataFrame:
     df = pd.read_sql_query(sqlite_query, conn)
     conn.close()
     return df
+
+def get_latest_snapshot(ticker: str) -> Optional[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
+    """Retrieve the most recent screening snapshot and option contracts for a given ticker from the database."""
+    engine = _get_sqlalchemy_engine()
+    
+    if engine is not None:
+        try:
+            from sqlalchemy import text
+            with engine.connect() as conn:
+                snap_row = conn.execute(
+                    text("SELECT id, timestamp, ticker, current_price, purchase_price, earnings_date FROM stock_snapshots WHERE UPPER(ticker) = :t ORDER BY id DESC LIMIT 1"),
+                    {"t": ticker.upper()}
+                ).mappings().first()
+                
+                if snap_row:
+                    snapshot = dict(snap_row)
+                    opt_rows = conn.execute(
+                        text("SELECT expiration_date, dte, target_type, strike_price, bid, ask, premium, implied_volatility_pct, delta, prob_itm_pct, prob_touch_pct, premium_roi_pct, ann_premium_roi_pct, max_roi_pct, ann_max_roi_pct, breakeven_price FROM option_results WHERE snapshot_id = :sid ORDER BY dte ASC, strike_price ASC"),
+                        {"sid": snapshot["id"]}
+                    ).mappings().all()
+                    
+                    results = []
+                    for r in opt_rows:
+                        row_dict = dict(r)
+                        term_label = "2-Month" if row_dict["dte"] <= 75 else "3-Month"
+                        row_dict["term"] = f"{term_label} (~{row_dict['dte']}d)"
+                        results.append(row_dict)
+                    return snapshot, results
+        except Exception as e:
+            print(f"[Warning] Loading snapshot from cloud DB failed: {e}. Falling back to SQLite.")
+
+    # SQLite fallback
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        "SELECT id, timestamp, ticker, current_price, purchase_price, earnings_date FROM stock_snapshots WHERE UPPER(ticker) = ? ORDER BY id DESC LIMIT 1",
+        (ticker.upper(),)
+    )
+    snap_row = cursor.fetchone()
+    
+    if not snap_row:
+        conn.close()
+        return None
+        
+    snapshot = dict(snap_row)
+    cursor.execute(
+        "SELECT expiration_date, dte, target_type, strike_price, bid, ask, premium, implied_volatility_pct, delta, prob_itm_pct, prob_touch_pct, premium_roi_pct, ann_premium_roi_pct, max_roi_pct, ann_max_roi_pct, breakeven_price FROM option_results WHERE snapshot_id = ? ORDER BY dte ASC, strike_price ASC",
+        (snapshot["id"],)
+    )
+    opt_rows = cursor.fetchall()
+    conn.close()
+    
+    results = []
+    for r in opt_rows:
+        row_dict = dict(r)
+        term_label = "2-Month" if row_dict["dte"] <= 75 else "3-Month"
+        row_dict["term"] = f"{term_label} (~{row_dict['dte']}d)"
+        results.append(row_dict)
+        
+    return snapshot, results

@@ -7,6 +7,7 @@ import os
 from screener import screen_covered_calls, resolve_to_symbol
 from database import init_db, save_screen_results, load_history, get_db_status, get_latest_snapshot
 from test_data_pipeline import load_sample_dataset, CSV_EXPORT_PATH, JSON_EXPORT_PATH
+from api_monitor import api_monitor
 
 st.set_page_config(
     page_title="Covered Call Screener & Yield Engine",
@@ -62,8 +63,31 @@ with st.sidebar:
     )
 
     run_button = st.button("Run Screener", type="primary")
-    
+
+    # ----------------- API TELEMETRY & CONTROLLER -----------------
     st.markdown("---")
+    with st.container(border=True):
+        st.caption("📡 API Monitor & Rate Limiter")
+        metrics = api_monitor.get_metrics()
+        
+        m_col1, m_col2 = st.columns(2)
+        m_col1.metric("API Calls", metrics['api_calls'])
+        m_col2.metric("Cache Hits", metrics['cache_hits'])
+        
+        st.progress(metrics['cache_hit_rate_pct'] / 100.0, text=f"Cache Efficiency: {metrics['cache_hit_rate_pct']}%")
+        
+        with st.expander("⚙️ Rate Limiting Controls"):
+            cooldown = st.slider("Request Delay (sec)", min_value=0.0, max_value=3.0, value=0.5, step=0.1, help="Cooldown sleep between yfinance API calls to avoid rate limits.")
+            api_monitor.cooldown_delay = cooldown
+            
+            session_cap = st.slider("Session API Cap", min_value=10, max_value=100, value=50, step=10, help="Maximum allowed live API calls per session.")
+            api_monitor.session_api_cap = session_cap
+            
+            st.caption(f"Remaining live calls: **{metrics['cap_remaining']} / {session_cap}**")
+            if st.button("Reset Telemetry Counters"):
+                api_monitor.reset_stats()
+                st.rerun()
+
     st.caption("Developed by **Asjad P.** ([GitHub @asjadp](https://github.com/asjadp))")
 
 # ----------------- SESSION STATE & SCREENING EXECUTION -----------------
@@ -102,39 +126,59 @@ if should_run and ticker_input:
             snapshot_id = snap_meta['id']
             snap_time = snap_meta['timestamp']
             
+            api_monitor.record_cache_hit(symbol, "Database Snapshot")
             st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "db", snap_time)
             loaded_from_db = True
 
-    # 2. Live Fetch via yfinance with Automatic DB Fallback
+    # 2. Live Fetch via yfinance with Automatic DB Fallback & Session Cap Check
     if not loaded_from_db:
-        with st.spinner(f"Fetching real-time option chains for '{ticker_input}' via yfinance..."):
-            try:
-                symbol, curr_price, ref_price, earnings_date, results = screen_covered_calls(ticker_input, custom_price)
-                snapshot_id = save_screen_results(symbol, curr_price, ref_price, earnings_date, results)
-                snap_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "live", snap_time)
-            except Exception as e:
-                # Automatic Resilience: If live fetch fails, check if we have an existing DB snapshot
-                fallback_snapshot = get_latest_snapshot(symbol_resolved)
-                if fallback_snapshot:
-                    snap_meta, snap_results = fallback_snapshot
-                    symbol = snap_meta['ticker']
-                    curr_price = snap_meta['current_price']
-                    ref_price = custom_price if (custom_price and custom_price > 0) else snap_meta['purchase_price']
-                    earnings_date = snap_meta.get('earnings_date', 'N/A')
-                    results = snap_results
-                    snapshot_id = snap_meta['id']
-                    snap_time = snap_meta['timestamp']
-                    st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "fallback", snap_time)
-                else:
-                    st.error(f"Could not fetch options data for '{ticker_input}': {str(e)}")
+        if not api_monitor.can_make_api_call():
+            st.warning(f"⚠️ Session API cap of {api_monitor.session_api_cap} calls reached. Switched automatically to Database Cache to protect against IP rate limits.")
+            fallback_snapshot = get_latest_snapshot(symbol_resolved)
+            if fallback_snapshot:
+                snap_meta, snap_results = fallback_snapshot
+                symbol = snap_meta['ticker']
+                curr_price = snap_meta['current_price']
+                ref_price = custom_price if (custom_price and custom_price > 0) else snap_meta['purchase_price']
+                earnings_date = snap_meta.get('earnings_date', 'N/A')
+                results = snap_results
+                snapshot_id = snap_meta['id']
+                snap_time = snap_meta['timestamp']
+                api_monitor.record_cache_hit(symbol, "Session Cap Fallback")
+                st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "fallback", snap_time)
+            else:
+                st.error(f"No cached data available for '{ticker_input}' and session API cap was reached.")
+        else:
+            with st.spinner(f"Fetching real-time option chains for '{ticker_input}' via yfinance..."):
+                try:
+                    symbol, curr_price, ref_price, earnings_date, results = screen_covered_calls(ticker_input, custom_price)
+                    snapshot_id = save_screen_results(symbol, curr_price, ref_price, earnings_date, results)
+                    snap_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "live", snap_time)
+                except Exception as e:
+                    # Automatic Resilience: If live fetch fails, check if we have an existing DB snapshot
+                    fallback_snapshot = get_latest_snapshot(symbol_resolved)
+                    if fallback_snapshot:
+                        snap_meta, snap_results = fallback_snapshot
+                        symbol = snap_meta['ticker']
+                        curr_price = snap_meta['current_price']
+                        ref_price = custom_price if (custom_price and custom_price > 0) else snap_meta['purchase_price']
+                        earnings_date = snap_meta.get('earnings_date', 'N/A')
+                        results = snap_results
+                        snapshot_id = snap_meta['id']
+                        snap_time = snap_meta['timestamp']
+                        api_monitor.record_cache_hit(symbol, "Error Recovery Snapshot")
+                        st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "fallback", snap_time)
+                    else:
+                        st.error(f"Could not fetch options data for '{ticker_input}': {str(e)}")
 
 # ----------------- MAIN DASHBOARD TABS -----------------
 st.title("📈 Covered Call Screener & Yield Engine")
 st.markdown("Quantitative Covered Call screening, Black-Scholes probability modeling, and multi-backend data persistence.")
 
-tab_live, tab_data_testing, tab_methodology = st.tabs([
+tab_live, tab_telemetry, tab_data_testing, tab_methodology = st.tabs([
     "🎯 Live Option Screener",
+    "📡 API Telemetry & Rate Limiter",
     "🧪 Data Testing & Benchmark Datasets",
     "📐 Quantitative Methodology & Architecture"
 ])
@@ -278,7 +322,30 @@ with tab_live:
         else:
             st.info(f"No historical records saved for {symbol} yet.")
 
-# ----------------- TAB 2: DATA TESTING & BENCHMARK DATASETS -----------------
+# ----------------- TAB 2: API TELEMETRY & RATE LIMITER -----------------
+with tab_telemetry:
+    st.subheader("📡 Real-Time API Telemetry & Traffic Inspector")
+    st.markdown("""
+    This panel tracks all outbound requests sent to Yahoo Finance / `yfinance`, response latencies, and cache efficiency in real time.
+    """)
+
+    t_metrics = api_monitor.get_metrics()
+    
+    col_tm1, col_tm2, col_tm3, col_tm4 = st.columns(4)
+    col_tm1.metric("Total Requests Handled", t_metrics['total_requests'])
+    col_tm2.metric("Outbound API Calls", t_metrics['api_calls'])
+    col_tm3.metric("Cache / DB Hits", t_metrics['cache_hits'])
+    col_tm4.metric("Average API Latency", f"{t_metrics['avg_latency_ms']} ms")
+
+    st.markdown("### Real-Time Request Event Stream")
+    logs = t_metrics['recent_logs']
+    if logs:
+        log_df = pd.DataFrame(logs)
+        st.dataframe(log_df, width="stretch")
+    else:
+        st.info("No API requests recorded yet in this session.")
+
+# ----------------- TAB 3: DATA TESTING & BENCHMARK DATASETS -----------------
 with tab_data_testing:
     st.subheader("🧪 Benchmark Options Dataset for Offline Data Testing")
     st.markdown("""
@@ -313,7 +380,7 @@ with tab_data_testing:
     else:
         st.info("No benchmark dataset found. Run `python test_data_pipeline.py` to generate the test datasets.")
 
-# ----------------- TAB 3: QUANTITATIVE METHODOLOGY -----------------
+# ----------------- TAB 4: QUANTITATIVE METHODOLOGY -----------------
 with tab_methodology:
     st.subheader("📐 Quantitative Formulas & Mathematical Modeling")
     

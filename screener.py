@@ -7,6 +7,7 @@ import urllib.parse
 import json
 import math
 import streamlit as st
+from api_monitor import api_monitor
 
 def norm_cdf(x: float) -> float:
     """Standard normal cumulative distribution function N(x)."""
@@ -58,25 +59,29 @@ def resolve_to_symbol(query: str) -> str:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_ticker_data_cached(input_query: str):
-    """Fetch ticker info with retry logic for robust production performance."""
+    """Fetch ticker info with retry logic and API telemetry monitoring."""
     symbol = resolve_to_symbol(input_query)
     ticker = yf.Ticker(symbol)
     
     current_price = None
     expirations = None
+    t0 = time.time()
     
     # Retry up to 3 times for API stability
     for attempt in range(3):
         try:
+            api_monitor.apply_throttle()
             info = ticker.fast_info
             current_price = info.get('lastPrice') or info.get('previousClose')
             if current_price and not pd.isna(current_price):
                 break
         except Exception:
             pass
-        time.sleep(0.4 * (attempt + 1))
+        time.sleep(0.3 * (attempt + 1))
         
     if not current_price or pd.isna(current_price):
+        lat = (time.time() - t0) * 1000.0
+        api_monitor.record_api_call("FastInfo", symbol, False, lat, "Price not found")
         raise ValueError(f"Could not retrieve stock price for '{symbol}' ({input_query}). Please verify the ticker.")
         
     earnings_date = get_earnings_date(ticker)
@@ -84,16 +89,20 @@ def fetch_ticker_data_cached(input_query: str):
     # Retry fetching option expirations
     for attempt in range(3):
         try:
+            api_monitor.apply_throttle()
             expirations = ticker.options
             if expirations and len(expirations) > 0:
                 break
         except Exception:
             pass
-        time.sleep(0.4 * (attempt + 1))
+        time.sleep(0.3 * (attempt + 1))
     
+    lat = (time.time() - t0) * 1000.0
     if not expirations:
+        api_monitor.record_api_call("OptionsList", symbol, False, lat, "Empty option chain")
         raise ValueError(f"No option chain data available for '{symbol}'. Check if options are traded for this stock.")
 
+    api_monitor.record_api_call("OptionsList", symbol, True, lat)
     return symbol, current_price, earnings_date, expirations
 
 def get_earnings_date(ticker_obj):
@@ -154,15 +163,21 @@ def screen_covered_calls(input_query: str, custom_purchase_price: float = None):
 
     for term_label, (exp_date_str, dte) in target_exps.items():
         chain = None
+        t_opt = time.time()
         for attempt in range(3):
             try:
+                api_monitor.apply_throttle()
                 chain = ticker.option_chain(exp_date_str)
                 if chain is not None and chain.calls is not None and not chain.calls.empty:
+                    lat_opt = (time.time() - t_opt) * 1000.0
+                    api_monitor.record_api_call(f"Chain ({exp_date_str})", symbol, True, lat_opt)
                     break
-            except Exception:
+            except Exception as e:
                 time.sleep(0.3)
         
         if chain is None or chain.calls is None or chain.calls.empty:
+            lat_opt = (time.time() - t_opt) * 1000.0
+            api_monitor.record_api_call(f"Chain ({exp_date_str})", symbol, False, lat_opt, "Empty call table")
             continue
         
         calls = chain.calls

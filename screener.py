@@ -57,9 +57,9 @@ def resolve_to_symbol(query: str) -> str:
         
     return cleaned.upper()
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_ticker_data_cached(input_query: str):
-    """Fetch ticker info with retry logic and API telemetry monitoring."""
+    """Fetch ticker info with 15-minute in-memory caching and background throttling."""
     symbol = resolve_to_symbol(input_query)
     ticker = yf.Ticker(symbol)
     
@@ -77,7 +77,7 @@ def fetch_ticker_data_cached(input_query: str):
                 break
         except Exception:
             pass
-        time.sleep(0.3 * (attempt + 1))
+        time.sleep(0.4 * (attempt + 1))
         
     if not current_price or pd.isna(current_price):
         lat = (time.time() - t0) * 1000.0
@@ -95,7 +95,7 @@ def fetch_ticker_data_cached(input_query: str):
                 break
         except Exception:
             pass
-        time.sleep(0.3 * (attempt + 1))
+        time.sleep(0.4 * (attempt + 1))
     
     lat = (time.time() - t0) * 1000.0
     if not expirations:
@@ -172,8 +172,8 @@ def screen_covered_calls(input_query: str, custom_purchase_price: float = None):
                     lat_opt = (time.time() - t_opt) * 1000.0
                     api_monitor.record_api_call(f"Chain ({exp_date_str})", symbol, True, lat_opt)
                     break
-            except Exception as e:
-                time.sleep(0.3)
+            except Exception:
+                time.sleep(0.4)
         
         if chain is None or chain.calls is None or chain.calls.empty:
             lat_opt = (time.time() - t_opt) * 1000.0

@@ -1,18 +1,20 @@
 """
-API Monitor & Rate Limiter Telemetry Engine
--------------------------------------------
-Tracks outbound requests to Yahoo Finance / yfinance API, counts success/error responses,
-monitors cache efficiency, and enforces production rate limits to prevent IP throttling.
+Background API Telemetry & Rate Limiter Engine
+---------------------------------------------
+Silent background engine enforcing:
+- Doubled Cooldown Delay: 1.2s between calls
+- Burst Limiter: Maximum 5 live requests per 60-second rolling window
+- Session Cap: Maximum 10 live calls per session
 """
 
 import time
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import threading
 
-# Optimal production constants for Yahoo Finance
-RECOMMENDED_REQUEST_DELAY = 0.6  # 600ms delay between requests prevents 429 throttles
-DEFAULT_SESSION_API_CAP = 40     # Maximum live API calls allowed per session
+COOLDOWN_DELAY = 1.2        # 1.2s cooldown delay between requests
+SESSION_API_CAP = 10        # Maximum 10 live calls per session
+BURST_LIMIT_PER_MIN = 5     # Maximum 5 live calls in any 60-second rolling window
 
 class APITelemetry:
     _instance = None
@@ -32,13 +34,32 @@ class APITelemetry:
         self.cache_hits = 0
         self.total_latency_ms = 0.0
         self.recent_logs: List[Dict[str, Any]] = []
-        self.cooldown_delay = RECOMMENDED_REQUEST_DELAY
-        self.session_api_cap = DEFAULT_SESSION_API_CAP
+        self.recent_request_timestamps: List[float] = []
+
+    def can_make_api_call(self) -> Tuple[bool, str]:
+        """Check both session cap and 5 req/min rolling burst limit."""
+        with self._lock:
+            if self.api_calls >= SESSION_API_CAP:
+                return False, f"Session cap of {SESSION_API_CAP} live API calls reached"
+            
+            # Clean up timestamps older than 60 seconds
+            now = time.time()
+            self.recent_request_timestamps = [t for t in self.recent_request_timestamps if (now - t) < 60.0]
+            if len(self.recent_request_timestamps) >= BURST_LIMIT_PER_MIN:
+                return False, f"Burst rate limit reached ({BURST_LIMIT_PER_MIN} live requests/min)"
+            
+            return True, ""
+
+    def apply_throttle(self):
+        """Pause 1.2s between requests to respect rate limits."""
+        time.sleep(COOLDOWN_DELAY)
 
     def record_api_call(self, endpoint: str, symbol: str, success: bool, latency_ms: float, error: Optional[str] = None):
         """Record an outbound API request to Yahoo Finance."""
         with self._lock:
             self.api_calls += 1
+            now = time.time()
+            self.recent_request_timestamps.append(now)
             self.total_latency_ms += latency_ms
             if success:
                 self.api_success += 1
@@ -48,7 +69,7 @@ class APITelemetry:
                 status_str = f"ERROR ({error or 'Rate Limited'})"
 
             log_entry = {
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "symbol": symbol.upper(),
                 "endpoint": endpoint,
                 "status": status_str,
@@ -56,7 +77,7 @@ class APITelemetry:
                 "is_cache": False
             }
             self.recent_logs.insert(0, log_entry)
-            if len(self.recent_logs) > 20:
+            if len(self.recent_logs) > 30:
                 self.recent_logs.pop()
 
     def record_cache_hit(self, symbol: str, source: str = "Database"):
@@ -64,19 +85,19 @@ class APITelemetry:
         with self._lock:
             self.cache_hits += 1
             log_entry = {
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "symbol": symbol.upper(),
                 "endpoint": f"Cached ({source})",
                 "status": "CACHE HIT (0 API Calls)",
-                "latency_ms": 1.2,
+                "latency_ms": 1.0,
                 "is_cache": True
             }
             self.recent_logs.insert(0, log_entry)
-            if len(self.recent_logs) > 20:
+            if len(self.recent_logs) > 30:
                 self.recent_logs.pop()
 
     def get_metrics(self) -> Dict[str, Any]:
-        """Return comprehensive real-time API telemetry metrics."""
+        """Return real-time API telemetry metrics."""
         with self._lock:
             total_reqs = self.api_calls + self.cache_hits
             cache_rate = (self.cache_hits / total_reqs * 100.0) if total_reqs > 0 else 100.0
@@ -91,25 +112,11 @@ class APITelemetry:
                 "cache_hit_rate_pct": round(cache_rate, 1),
                 "avg_latency_ms": round(avg_latency, 1),
                 "recent_logs": list(self.recent_logs),
-                "cap_remaining": max(0, self.session_api_cap - self.api_calls),
-                "cooldown_delay": self.cooldown_delay,
-                "session_cap": self.session_api_cap
+                "cap_remaining": max(0, SESSION_API_CAP - self.api_calls),
+                "session_cap": SESSION_API_CAP,
+                "burst_limit": BURST_LIMIT_PER_MIN,
+                "cooldown_sec": COOLDOWN_DELAY
             }
-
-    def can_make_api_call(self) -> bool:
-        """Check if session is within rate limit cap."""
-        with self._lock:
-            return self.api_calls < self.session_api_cap
-
-    def apply_throttle(self):
-        """Pause between requests to respect Yahoo Finance rate limits."""
-        if self.cooldown_delay > 0:
-            time.sleep(self.cooldown_delay)
-
-    def reset_stats(self):
-        """Reset telemetry counters."""
-        with self._lock:
-            self._init_state()
 
 # Global Singleton Instance
 api_monitor = APITelemetry()

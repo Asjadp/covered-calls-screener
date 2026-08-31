@@ -24,62 +24,50 @@ db_status = get_db_status()
 with st.sidebar:
     st.title("📈 Screener Controls")
     
-    # Storage Backend Status Badge
+    # Active Storage Status
     with st.container(border=True):
         st.caption("Active Data Persistence")
         st.markdown(f"**{db_status['label']}**")
-        with st.expander("Cloud Database Info"):
+        with st.expander("Cloud Database Architecture"):
             st.markdown("""
-            **Dual-Backend Architecture**:
-            - **Local Mode**: Zero-config SQLite (`covered_calls.db`).
-            - **Cloud Mode**: Free **Supabase** or **Neon PostgreSQL** via `st.secrets["DATABASE_URL"]`.
-            All screening runs are automatically timestamped and indexed for backtesting.
+            **Dual-Backend Engine**:
+            - **Local Persistence**: SQLite (`covered_calls.db`).
+            - **Cloud Persistence**: Free **Supabase** or **Neon PostgreSQL** via `DATABASE_URL`.
+            All option scans are timestamped and indexed for backtesting.
             """)
 
-    st.markdown("### Select or Enter Ticker")
+    st.markdown("### Stock Selection")
     
-    # Quick Pick Pills for Recruiter Testing
+    # Quick Pick Pills for Rapid Trade Analysis
     popular_tickers = ["AAPL", "NVDA", "TSLA", "MSFT", "SPY", "AMD"]
     selected_pill = st.pills("Quick Picks", popular_tickers, default=None)
     
     default_ticker = selected_pill if selected_pill else "AAPL"
     ticker_input = st.text_input(
-        "Stock Symbol or Company Name",
+        "Ticker Symbol or Company Name",
         value=default_ticker,
-        help="Enter any US stock ticker (e.g. AAPL, NVDA) or company name (e.g. Apple, Microsoft)."
+        help="Enter any US stock ticker (e.g. AAPL, NVDA, TSLA) or company name."
     ).strip()
 
-    use_custom_cost = st.checkbox("Custom Purchase Price", help="Calculate ROIs against your own historical buy price instead of current market price.")
+    use_custom_cost = st.checkbox("Custom Purchase Price", help="Calculate yields against your personal purchase price instead of current market price.")
     custom_price = None
     if use_custom_cost:
         custom_price = st.number_input("Your Purchase Price ($)", min_value=0.01, value=150.0, step=0.50)
 
-    # Data Fetching Mode (Cached Database vs Live Refresh)
+    # Data Mode
     data_mode = st.radio(
         "Data Mode",
         options=["⚡ Fast Database Snapshot", "🔄 Live Market Refresh"],
         index=0,
-        help="⚡ Fast Database Snapshot loads pre-saved database records instantly without calling yfinance API. 🔄 Live Market Refresh queries live market option chains."
+        help="⚡ Fast Database Snapshot instantly loads saved option records (0 API calls). 🔄 Live Market Refresh queries live market option chains."
     )
 
     run_button = st.button("Run Screener", type="primary")
 
-    # ----------------- READ-ONLY API TELEMETRY MONITOR -----------------
     st.markdown("---")
-    with st.container(border=True):
-        st.caption("📡 API Telemetry & Efficiency")
-        metrics = api_monitor.get_metrics()
-        
-        m_col1, m_col2 = st.columns(2)
-        m_col1.metric("Live API Calls", metrics['api_calls'])
-        m_col2.metric("Cache / DB Hits", metrics['cache_hits'])
-        
-        st.progress(metrics['cache_hit_rate_pct'] / 100.0, text=f"Efficiency: {metrics['cache_hit_rate_pct']}% Cached")
-        st.caption("🛡️ **System Protection**: Built-in 0.6s throttling & automatic database snapshot recovery active.")
-
     st.caption("Developed by **Asjad P.** ([GitHub @asjadp](https://github.com/asjadp))")
 
-# ----------------- SESSION STATE & SCREENING EXECUTION -----------------
+# ----------------- SCREENING EXECUTION & BACKGROUND RATE LIMITING -----------------
 last_ticker = st.session_state.get('last_ticker')
 last_price = st.session_state.get('last_price')
 last_mode = st.session_state.get('last_mode')
@@ -119,10 +107,11 @@ if should_run and ticker_input:
             st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "db", snap_time)
             loaded_from_db = True
 
-    # 2. Live Fetch via yfinance with Automatic DB Fallback & Session Cap Check
+    # 2. Live Fetch via yfinance with Background Burst/Session Limiting & Auto-Fallback
     if not loaded_from_db:
-        if not api_monitor.can_make_api_call():
-            st.warning(f"⚠️ Session API cap of {api_monitor.session_api_cap} calls reached. Switched automatically to Database Cache to protect against IP rate limits.")
+        can_call, limit_reason = api_monitor.can_make_api_call()
+        
+        if not can_call:
             fallback_snapshot = get_latest_snapshot(symbol_resolved)
             if fallback_snapshot:
                 snap_meta, snap_results = fallback_snapshot
@@ -133,10 +122,10 @@ if should_run and ticker_input:
                 results = snap_results
                 snapshot_id = snap_meta['id']
                 snap_time = snap_meta['timestamp']
-                api_monitor.record_cache_hit(symbol, "Session Cap Fallback")
-                st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "fallback", snap_time)
+                api_monitor.record_cache_hit(symbol, "Rate Limit Fallback")
+                st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "rate_limit_fallback", snap_time, limit_reason)
             else:
-                st.error(f"No cached data available for '{ticker_input}' and session API cap was reached.")
+                st.error(f"Rate limit active ({limit_reason}) and no cached data available for '{ticker_input}'.")
         else:
             with st.spinner(f"Fetching real-time option chains for '{ticker_input}' via yfinance..."):
                 try:
@@ -145,7 +134,6 @@ if should_run and ticker_input:
                     snap_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "live", snap_time)
                 except Exception as e:
-                    # Automatic Resilience: If live fetch fails, check if we have an existing DB snapshot
                     fallback_snapshot = get_latest_snapshot(symbol_resolved)
                     if fallback_snapshot:
                         snap_meta, snap_results = fallback_snapshot
@@ -157,7 +145,7 @@ if should_run and ticker_input:
                         snapshot_id = snap_meta['id']
                         snap_time = snap_meta['timestamp']
                         api_monitor.record_cache_hit(symbol, "Error Recovery Snapshot")
-                        st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "fallback", snap_time)
+                        st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "error_fallback", snap_time)
                     else:
                         st.error(f"Could not fetch options data for '{ticker_input}': {str(e)}")
 
@@ -165,26 +153,38 @@ if should_run and ticker_input:
 st.title("📈 Covered Call Screener & Yield Engine")
 st.markdown("Quantitative Covered Call screening, Black-Scholes probability modeling, and multi-backend data persistence.")
 
-tab_live, tab_telemetry, tab_data_testing, tab_methodology = st.tabs([
-    "🎯 Live Option Screener",
-    "📡 API Telemetry & Latency",
-    "🧪 Data Testing & Benchmark Datasets",
-    "📐 Quantitative Methodology & Architecture"
+tab_live, tab_data_testing, tab_methodology = st.tabs([
+    "🎯 Covered Call Screener & Yield Matrix",
+    "🧪 Benchmark Datasets & Backtesting",
+    "📐 Quantitative Methodology & Formulas"
 ])
 
-# ----------------- TAB 1: LIVE OPTION SCREENER -----------------
+# ----------------- TAB 1: COVERED CALL SCREENER -----------------
 with tab_live:
     if 'results' in st.session_state:
-        symbol, original_input, curr_price, ref_price, earnings_date, results, snapshot_id, source, snap_time = st.session_state['results']
+        res_data = st.session_state['results']
+        symbol = res_data[0]
+        original_input = res_data[1]
+        curr_price = res_data[2]
+        ref_price = res_data[3]
+        earnings_date = res_data[4]
+        results = res_data[5]
+        snapshot_id = res_data[6]
+        source = res_data[7]
+        snap_time = res_data[8]
 
+        # Prominent Timestamp & Data Origin Banner
         if source == "db":
-            st.info(f"⚡ **Loaded instantly from Database Snapshot** (#{snapshot_id}, saved on `{snap_time}`). 0 external API calls used.")
-        elif source == "fallback":
-            st.warning(f"⚠️ Live market API is currently rate-limited. **Seamlessly loaded latest verified snapshot from database** (#{snapshot_id} from `{snap_time}`).")
+            st.info(f"🕒 **Data Sourced**: `{snap_time}` | **Origin**: Saved Database Snapshot (Snapshot #{snapshot_id})")
+        elif source == "rate_limit_fallback":
+            limit_reason = res_data[9] if len(res_data) > 9 else "Rate limit active"
+            st.warning(f"🕒 **Data Sourced**: `{snap_time}` | 🛡️ **Protection**: {limit_reason}. Loaded verified Database Snapshot (#{snapshot_id}).")
+        elif source == "error_fallback":
+            st.warning(f"🕒 **Data Sourced**: `{snap_time}` | ⚠️ Live API throttled. Loaded latest verified Database Snapshot (#{snapshot_id}).")
         else:
-            st.success(f"🔄 **Live market data fetched & saved** to database (#{snapshot_id} at `{snap_time}`).")
+            st.success(f"🕒 **Data Sourced**: `{snap_time}` | **Origin**: Live Real-Time Market Quote (Saved as Snapshot #{snapshot_id})")
 
-        # Top KPI Metrics Cards
+        # Key KPI Metrics Cards
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
         with kpi1:
             st.metric("Stock Symbol", symbol)
@@ -201,7 +201,6 @@ with tab_live:
         if results:
             df = pd.DataFrame(results)
             
-            # Format display columns
             cols_to_include = [
                 'term', 'expiration_date', 'target_type', 'strike_price', 'premium',
                 'implied_volatility_pct', 'delta', 'prob_itm_pct', 'prob_touch_pct',
@@ -233,7 +232,7 @@ with tab_live:
             # CSV Export
             csv_data = display_df.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label=f"📥 Export {symbol} Screen Results (CSV)",
+                label=f"📥 Export {symbol} Option Matrix (CSV)",
                 data=csv_data,
                 file_name=f"{symbol}_covered_calls_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
@@ -311,30 +310,7 @@ with tab_live:
         else:
             st.info(f"No historical records saved for {symbol} yet.")
 
-# ----------------- TAB 2: API TELEMETRY & OBSERVABILITY -----------------
-with tab_telemetry:
-    st.subheader("📡 Real-Time API Telemetry & Traffic Inspector")
-    st.markdown("""
-    This observability panel provides real-time telemetry into outbound Yahoo Finance API traffic, response latency, and database caching efficiency.
-    """)
-
-    t_metrics = api_monitor.get_metrics()
-    
-    col_tm1, col_tm2, col_tm3, col_tm4 = st.columns(4)
-    col_tm1.metric("Total User Requests", t_metrics['total_requests'])
-    col_tm2.metric("Outbound API Calls", t_metrics['api_calls'])
-    col_tm3.metric("Database Cache Hits", t_metrics['cache_hits'])
-    col_tm4.metric("Avg. Response Latency", f"{t_metrics['avg_latency_ms']} ms")
-
-    st.markdown("### Real-Time Request Event Stream")
-    logs = t_metrics['recent_logs']
-    if logs:
-        log_df = pd.DataFrame(logs)
-        st.dataframe(log_df, width="stretch")
-    else:
-        st.info("No API requests recorded yet in this session.")
-
-# ----------------- TAB 3: DATA TESTING & BENCHMARK DATASETS -----------------
+# ----------------- TAB 2: BENCHMARK DATASETS & BACKTESTING -----------------
 with tab_data_testing:
     st.subheader("🧪 Benchmark Options Dataset for Offline Data Testing")
     st.markdown("""
@@ -369,7 +345,7 @@ with tab_data_testing:
     else:
         st.info("No benchmark dataset found. Run `python test_data_pipeline.py` to generate the test datasets.")
 
-# ----------------- TAB 4: QUANTITATIVE METHODOLOGY -----------------
+# ----------------- TAB 3: QUANTITATIVE METHODOLOGY -----------------
 with tab_methodology:
     st.subheader("📐 Quantitative Formulas & Mathematical Modeling")
     

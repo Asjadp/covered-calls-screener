@@ -2,13 +2,17 @@
 API Monitor & Rate Limiter Telemetry Engine
 -------------------------------------------
 Tracks outbound requests to Yahoo Finance / yfinance API, counts success/error responses,
-monitors cache efficiency, and enforces rate limits to prevent IP throttling.
+monitors cache efficiency, and enforces production rate limits to prevent IP throttling.
 """
 
 import time
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 import threading
+
+# Optimal production constants for Yahoo Finance
+RECOMMENDED_REQUEST_DELAY = 0.6  # 600ms delay between requests prevents 429 throttles
+DEFAULT_SESSION_API_CAP = 40     # Maximum live API calls allowed per session
 
 class APITelemetry:
     _instance = None
@@ -28,8 +32,8 @@ class APITelemetry:
         self.cache_hits = 0
         self.total_latency_ms = 0.0
         self.recent_logs: List[Dict[str, Any]] = []
-        self.cooldown_delay = 0.5  # seconds
-        self.session_api_cap = 50  # maximum live calls per session
+        self.cooldown_delay = RECOMMENDED_REQUEST_DELAY
+        self.session_api_cap = DEFAULT_SESSION_API_CAP
 
     def record_api_call(self, endpoint: str, symbol: str, success: bool, latency_ms: float, error: Optional[str] = None):
         """Record an outbound API request to Yahoo Finance."""
@@ -87,7 +91,9 @@ class APITelemetry:
                 "cache_hit_rate_pct": round(cache_rate, 1),
                 "avg_latency_ms": round(avg_latency, 1),
                 "recent_logs": list(self.recent_logs),
-                "cap_remaining": max(0, self.session_api_cap - self.api_calls)
+                "cap_remaining": max(0, self.session_api_cap - self.api_calls),
+                "cooldown_delay": self.cooldown_delay,
+                "session_cap": self.session_api_cap
             }
 
     def can_make_api_call(self) -> bool:
@@ -95,11 +101,10 @@ class APITelemetry:
         with self._lock:
             return self.api_calls < self.session_api_cap
 
-    def apply_throttle(self, custom_delay: Optional[float] = None):
-        """Pause between requests to respect rate limits."""
-        delay = custom_delay if custom_delay is not None else self.cooldown_delay
-        if delay > 0:
-            time.sleep(delay)
+    def apply_throttle(self):
+        """Pause between requests to respect Yahoo Finance rate limits."""
+        if self.cooldown_delay > 0:
+            time.sleep(self.cooldown_delay)
 
     def reset_stats(self):
         """Reset telemetry counters."""

@@ -64,29 +64,18 @@ with st.sidebar:
 
     run_button = st.button("Run Screener", type="primary")
 
-    # ----------------- API TELEMETRY & CONTROLLER -----------------
+    # ----------------- READ-ONLY API TELEMETRY MONITOR -----------------
     st.markdown("---")
     with st.container(border=True):
-        st.caption("📡 API Monitor & Rate Limiter")
+        st.caption("📡 API Telemetry & Efficiency")
         metrics = api_monitor.get_metrics()
         
         m_col1, m_col2 = st.columns(2)
-        m_col1.metric("API Calls", metrics['api_calls'])
-        m_col2.metric("Cache Hits", metrics['cache_hits'])
+        m_col1.metric("Live API Calls", metrics['api_calls'])
+        m_col2.metric("Cache / DB Hits", metrics['cache_hits'])
         
-        st.progress(metrics['cache_hit_rate_pct'] / 100.0, text=f"Cache Efficiency: {metrics['cache_hit_rate_pct']}%")
-        
-        with st.expander("⚙️ Rate Limiting Controls"):
-            cooldown = st.slider("Request Delay (sec)", min_value=0.0, max_value=3.0, value=0.5, step=0.1, help="Cooldown sleep between yfinance API calls to avoid rate limits.")
-            api_monitor.cooldown_delay = cooldown
-            
-            session_cap = st.slider("Session API Cap", min_value=10, max_value=100, value=50, step=10, help="Maximum allowed live API calls per session.")
-            api_monitor.session_api_cap = session_cap
-            
-            st.caption(f"Remaining live calls: **{metrics['cap_remaining']} / {session_cap}**")
-            if st.button("Reset Telemetry Counters"):
-                api_monitor.reset_stats()
-                st.rerun()
+        st.progress(metrics['cache_hit_rate_pct'] / 100.0, text=f"Efficiency: {metrics['cache_hit_rate_pct']}% Cached")
+        st.caption("🛡️ **System Protection**: Built-in 0.6s throttling & automatic database snapshot recovery active.")
 
     st.caption("Developed by **Asjad P.** ([GitHub @asjadp](https://github.com/asjadp))")
 
@@ -178,7 +167,7 @@ st.markdown("Quantitative Covered Call screening, Black-Scholes probability mode
 
 tab_live, tab_telemetry, tab_data_testing, tab_methodology = st.tabs([
     "🎯 Live Option Screener",
-    "📡 API Telemetry & Rate Limiter",
+    "📡 API Telemetry & Latency",
     "🧪 Data Testing & Benchmark Datasets",
     "📐 Quantitative Methodology & Architecture"
 ])
@@ -322,20 +311,20 @@ with tab_live:
         else:
             st.info(f"No historical records saved for {symbol} yet.")
 
-# ----------------- TAB 2: API TELEMETRY & RATE LIMITER -----------------
+# ----------------- TAB 2: API TELEMETRY & OBSERVABILITY -----------------
 with tab_telemetry:
     st.subheader("📡 Real-Time API Telemetry & Traffic Inspector")
     st.markdown("""
-    This panel tracks all outbound requests sent to Yahoo Finance / `yfinance`, response latencies, and cache efficiency in real time.
+    This observability panel provides real-time telemetry into outbound Yahoo Finance API traffic, response latency, and database caching efficiency.
     """)
 
     t_metrics = api_monitor.get_metrics()
     
     col_tm1, col_tm2, col_tm3, col_tm4 = st.columns(4)
-    col_tm1.metric("Total Requests Handled", t_metrics['total_requests'])
+    col_tm1.metric("Total User Requests", t_metrics['total_requests'])
     col_tm2.metric("Outbound API Calls", t_metrics['api_calls'])
-    col_tm3.metric("Cache / DB Hits", t_metrics['cache_hits'])
-    col_tm4.metric("Average API Latency", f"{t_metrics['avg_latency_ms']} ms")
+    col_tm3.metric("Database Cache Hits", t_metrics['cache_hits'])
+    col_tm4.metric("Avg. Response Latency", f"{t_metrics['avg_latency_ms']} ms")
 
     st.markdown("### Real-Time Request Event Stream")
     logs = t_metrics['recent_logs']

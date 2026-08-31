@@ -41,11 +41,11 @@ def resolve_to_symbol(query: str) -> str:
         return cleaned
 
     url = f"https://query2.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(cleaned)}&quotesCount=5"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with urllib.request.urlopen(req, timeout=4) as resp:
             data = json.loads(resp.read().decode())
             quotes = data.get('quotes', [])
             for q in quotes:
@@ -58,26 +58,38 @@ def resolve_to_symbol(query: str) -> str:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_ticker_data_cached(input_query: str):
-    """Fetch ticker info resolving company names or ticker symbols."""
-    time.sleep(0.5)
+    """Fetch ticker info with retry logic for robust production performance."""
     symbol = resolve_to_symbol(input_query)
     ticker = yf.Ticker(symbol)
     
-    try:
-        info = ticker.fast_info
-        current_price = info.get('lastPrice') or info.get('previousClose')
-    except Exception:
-        raise ValueError(f"Could not find stock ticker for '{input_query}'. Please check the company name or symbol.")
+    current_price = None
+    expirations = None
+    
+    # Retry up to 3 times for API stability
+    for attempt in range(3):
+        try:
+            info = ticker.fast_info
+            current_price = info.get('lastPrice') or info.get('previousClose')
+            if current_price and not pd.isna(current_price):
+                break
+        except Exception:
+            pass
+        time.sleep(0.4 * (attempt + 1))
         
     if not current_price or pd.isna(current_price):
-        raise ValueError(f"Could not retrieve stock price for '{symbol}' ({input_query}).")
+        raise ValueError(f"Could not retrieve stock price for '{symbol}' ({input_query}). Please verify the ticker.")
         
     earnings_date = get_earnings_date(ticker)
     
-    try:
-        expirations = ticker.options
-    except Exception:
-        expirations = None
+    # Retry fetching option expirations
+    for attempt in range(3):
+        try:
+            expirations = ticker.options
+            if expirations and len(expirations) > 0:
+                break
+        except Exception:
+            pass
+        time.sleep(0.4 * (attempt + 1))
     
     if not expirations:
         raise ValueError(f"No option chain data available for '{symbol}'. Check if options are traded for this stock.")
@@ -141,16 +153,19 @@ def screen_covered_calls(input_query: str, custom_purchase_price: float = None):
     ticker = yf.Ticker(symbol)
 
     for term_label, (exp_date_str, dte) in target_exps.items():
-        time.sleep(0.3)
-        try:
-            chain = ticker.option_chain(exp_date_str)
-            calls = chain.calls
-        except Exception:
+        chain = None
+        for attempt in range(3):
+            try:
+                chain = ticker.option_chain(exp_date_str)
+                if chain is not None and chain.calls is not None and not chain.calls.empty:
+                    break
+            except Exception:
+                time.sleep(0.3)
+        
+        if chain is None or chain.calls is None or chain.calls.empty:
             continue
         
-        if calls is None or calls.empty:
-            continue
-
+        calls = chain.calls
         strikes = calls['strike'].values
         targets = [
             ('5% OTM', ref_price * 1.05),
@@ -159,7 +174,10 @@ def screen_covered_calls(input_query: str, custom_purchase_price: float = None):
 
         for target_label, target_val in targets:
             strike = get_nearest_strike(strikes, target_val)
-            option_row = calls[calls['strike'] == strike].iloc[0]
+            matching = calls[calls['strike'] == strike]
+            if matching.empty:
+                continue
+            option_row = matching.iloc[0]
             
             bid = float(option_row.get('bid', 0.0))
             ask = float(option_row.get('ask', 0.0))

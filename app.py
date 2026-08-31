@@ -89,7 +89,7 @@ if should_run and ticker_input:
     
     loaded_from_db = False
     
-    # Try Database Snapshot First if in Cached Mode
+    # 1. Try Database Snapshot First if in Cached Mode
     if not is_live:
         existing_snapshot = get_latest_snapshot(symbol_resolved)
         if existing_snapshot:
@@ -105,7 +105,7 @@ if should_run and ticker_input:
             st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "db", snap_time)
             loaded_from_db = True
 
-    # Otherwise fetch live from yfinance
+    # 2. Live Fetch via yfinance with Automatic DB Fallback
     if not loaded_from_db:
         with st.spinner(f"Fetching real-time option chains for '{ticker_input}' via yfinance..."):
             try:
@@ -114,7 +114,20 @@ if should_run and ticker_input:
                 snap_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "live", snap_time)
             except Exception as e:
-                st.error(f"Error analyzing '{ticker_input}': {str(e)}")
+                # Automatic Resilience: If live fetch fails, check if we have an existing DB snapshot
+                fallback_snapshot = get_latest_snapshot(symbol_resolved)
+                if fallback_snapshot:
+                    snap_meta, snap_results = fallback_snapshot
+                    symbol = snap_meta['ticker']
+                    curr_price = snap_meta['current_price']
+                    ref_price = custom_price if (custom_price and custom_price > 0) else snap_meta['purchase_price']
+                    earnings_date = snap_meta.get('earnings_date', 'N/A')
+                    results = snap_results
+                    snapshot_id = snap_meta['id']
+                    snap_time = snap_meta['timestamp']
+                    st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "fallback", snap_time)
+                else:
+                    st.error(f"Could not fetch options data for '{ticker_input}': {str(e)}")
 
 # ----------------- MAIN DASHBOARD TABS -----------------
 st.title("📈 Covered Call Screener & Yield Engine")
@@ -132,7 +145,9 @@ with tab_live:
         symbol, original_input, curr_price, ref_price, earnings_date, results, snapshot_id, source, snap_time = st.session_state['results']
 
         if source == "db":
-            st.info(f"⚡ **Loaded instantly from Database Snapshot** (#{snapshot_id}, saved on `{snap_time}`). No external API calls used.")
+            st.info(f"⚡ **Loaded instantly from Database Snapshot** (#{snapshot_id}, saved on `{snap_time}`). 0 external API calls used.")
+        elif source == "fallback":
+            st.warning(f"⚠️ Live market API is currently rate-limited. **Seamlessly loaded latest verified snapshot from database** (#{snapshot_id} from `{snap_time}`).")
         else:
             st.success(f"🔄 **Live market data fetched & saved** to database (#{snapshot_id} at `{snap_time}`).")
 

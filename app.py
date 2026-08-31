@@ -7,7 +7,7 @@ import os
 from screener import screen_covered_calls, resolve_to_symbol
 from database import init_db, save_screen_results, load_history, get_db_status, get_latest_snapshot
 from test_data_pipeline import load_sample_dataset, CSV_EXPORT_PATH, JSON_EXPORT_PATH
-from api_monitor import api_monitor
+from api_monitor import api_monitor, is_market_open_now, is_snapshot_frozen_after_market_close
 
 st.set_page_config(
     page_title="Covered Call Screener & Yield Engine",
@@ -55,6 +55,7 @@ with st.sidebar:
         custom_price = st.number_input("Your Purchase Price ($)", min_value=0.01, value=150.0, step=0.50)
 
     # Data Mode
+    market_open = is_market_open_now()
     data_mode = st.radio(
         "Data Mode",
         options=["⚡ Fast Database Snapshot", "🔄 Live Market Refresh"],
@@ -67,7 +68,7 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Developed by **Asjad P.** ([GitHub @asjadp](https://github.com/asjadp))")
 
-# ----------------- SCREENING EXECUTION & BACKGROUND RATE LIMITING -----------------
+# ----------------- SCREENING EXECUTION & SMART MARKET-CLOSED CACHING -----------------
 last_ticker = st.session_state.get('last_ticker')
 last_price = st.session_state.get('last_price')
 last_mode = st.session_state.get('last_mode')
@@ -86,35 +87,50 @@ if should_run and ticker_input:
     st.session_state['last_mode'] = data_mode
     
     symbol_resolved = resolve_to_symbol(ticker_input)
-    is_live = (data_mode == "🔄 Live Market Refresh")
+    is_live_requested = (data_mode == "🔄 Live Market Refresh")
     
     loaded_from_db = False
+    existing_snapshot = get_latest_snapshot(symbol_resolved)
     
-    # 1. Try Database Snapshot First if in Cached Mode
-    if not is_live:
-        existing_snapshot = get_latest_snapshot(symbol_resolved)
-        if existing_snapshot:
-            snap_meta, snap_results = existing_snapshot
-            symbol = snap_meta['ticker']
-            curr_price = snap_meta['current_price']
-            ref_price = custom_price if (custom_price and custom_price > 0) else snap_meta['purchase_price']
-            earnings_date = snap_meta.get('earnings_date', 'N/A')
-            results = snap_results
-            snapshot_id = snap_meta['id']
-            snap_time = snap_meta['timestamp']
-            
-            api_monitor.record_cache_hit(symbol, "Database Snapshot")
-            st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "db", snap_time)
-            loaded_from_db = True
+    # 1. Market-Closed Smart Freeze Rule:
+    # If market is closed and we already have a snapshot captured after market close,
+    # NEVER make a live API call because option settlement prices are frozen until 9:30 AM ET.
+    if existing_snapshot and is_snapshot_frozen_after_market_close(existing_snapshot[0]['timestamp']):
+        snap_meta, snap_results = existing_snapshot
+        symbol = snap_meta['ticker']
+        curr_price = snap_meta['current_price']
+        ref_price = custom_price if (custom_price and custom_price > 0) else snap_meta['purchase_price']
+        earnings_date = snap_meta.get('earnings_date', 'N/A')
+        results = snap_results
+        snapshot_id = snap_meta['id']
+        snap_time = snap_meta['timestamp']
+        
+        api_monitor.record_cache_hit(symbol, "Market Closed Freeze")
+        st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "market_closed_freeze", snap_time)
+        loaded_from_db = True
 
-    # 2. Live Fetch via yfinance with Background Burst/Session Limiting & Auto-Fallback
+    # 2. If user specifically requested Fast Database Snapshot and snapshot exists
+    elif not is_live_requested and existing_snapshot:
+        snap_meta, snap_results = existing_snapshot
+        symbol = snap_meta['ticker']
+        curr_price = snap_meta['current_price']
+        ref_price = custom_price if (custom_price and custom_price > 0) else snap_meta['purchase_price']
+        earnings_date = snap_meta.get('earnings_date', 'N/A')
+        results = snap_results
+        snapshot_id = snap_meta['id']
+        snap_time = snap_meta['timestamp']
+        
+        api_monitor.record_cache_hit(symbol, "Database Snapshot")
+        st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "db", snap_time)
+        loaded_from_db = True
+
+    # 3. Live Fetch via yfinance (if market is open OR if no closing snapshot exists yet for this ticker)
     if not loaded_from_db:
         can_call, limit_reason = api_monitor.can_make_api_call()
         
         if not can_call:
-            fallback_snapshot = get_latest_snapshot(symbol_resolved)
-            if fallback_snapshot:
-                snap_meta, snap_results = fallback_snapshot
+            if existing_snapshot:
+                snap_meta, snap_results = existing_snapshot
                 symbol = snap_meta['ticker']
                 curr_price = snap_meta['current_price']
                 ref_price = custom_price if (custom_price and custom_price > 0) else snap_meta['purchase_price']
@@ -127,16 +143,15 @@ if should_run and ticker_input:
             else:
                 st.error(f"Rate limit active ({limit_reason}) and no cached data available for '{ticker_input}'.")
         else:
-            with st.spinner(f"Fetching real-time option chains for '{ticker_input}' via yfinance..."):
+            with st.spinner(f"Fetching option chains for '{ticker_input}' via yfinance..."):
                 try:
                     symbol, curr_price, ref_price, earnings_date, results = screen_covered_calls(ticker_input, custom_price)
                     snapshot_id = save_screen_results(symbol, curr_price, ref_price, earnings_date, results)
                     snap_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "live", snap_time)
                 except Exception as e:
-                    fallback_snapshot = get_latest_snapshot(symbol_resolved)
-                    if fallback_snapshot:
-                        snap_meta, snap_results = fallback_snapshot
+                    if existing_snapshot:
+                        snap_meta, snap_results = existing_snapshot
                         symbol = snap_meta['ticker']
                         curr_price = snap_meta['current_price']
                         ref_price = custom_price if (custom_price and custom_price > 0) else snap_meta['purchase_price']
@@ -174,7 +189,9 @@ with tab_live:
         snap_time = res_data[8]
 
         # Prominent Timestamp & Data Origin Banner
-        if source == "db":
+        if source == "market_closed_freeze":
+            st.info(f"🕒 **Data Sourced**: `{snap_time}` | 🔒 **Market Closed**: Option prices are frozen until next market open (9:30 AM ET). Served closing settlement snapshot (0 API calls).")
+        elif source == "db":
             st.info(f"🕒 **Data Sourced**: `{snap_time}` | **Origin**: Saved Database Snapshot (Snapshot #{snapshot_id})")
         elif source == "rate_limit_fallback":
             limit_reason = res_data[9] if len(res_data) > 9 else "Rate limit active"

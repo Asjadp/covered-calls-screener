@@ -12,7 +12,7 @@ from database import (
     save_subscriber, get_subscribers
 )
 from weekly_scanner import run_weekly_scan, TOP_50_SPY
-from api_monitor import api_monitor, is_market_open_now, is_snapshot_frozen_after_market_close, is_snapshot_fresh
+from api_monitor import api_monitor, is_market_open_now, is_snapshot_fresh
 
 st.set_page_config(
     page_title="Covered Call Screener & Yield Engine",

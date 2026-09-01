@@ -70,6 +70,7 @@ def run_weekly_scan(
         
         print(f"[{idx}/{total}] Screening {ticker}...", end=" ", flush=True)
         try:
+            ticker_scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             symbol, curr_price, ref_price, earnings_date, results = screen_covered_calls(ticker)
             if not results:
                 print("No option contracts found.")
@@ -86,7 +87,7 @@ def run_weekly_scan(
                     "ticker": symbol,
                     "stock_price": curr_price,
                     "earnings_date": earnings_date,
-                    "generated_at": timestamp,
+                    "generated_at": ticker_scan_time,
                     **best_5
                 })
 
@@ -96,7 +97,7 @@ def run_weekly_scan(
                     "ticker": symbol,
                     "stock_price": curr_price,
                     "earnings_date": earnings_date,
-                    "generated_at": timestamp,
+                    "generated_at": ticker_scan_time,
                     **best_10
                 })
 

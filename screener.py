@@ -6,47 +6,119 @@ import urllib.request
 import urllib.parse
 import json
 import math
+from typing import Optional, List, Dict, Any, Tuple
 import streamlit as st
-from api_monitor import api_monitor
+from api_monitor import api_monitor, is_market_open_now
 
 def norm_cdf(x: float) -> float:
     """Standard normal cumulative distribution function N(x)."""
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
-def calculate_option_probabilities(S: float, K: float, iv_pct: float, dte: int, r: float = 0.045):
+def calculate_option_greeks_and_probabilities(S: float, K: float, iv_pct: float, dte: int, r: float = 0.045):
     """
-    Calculate Probability of Expiring In-The-Money (ITM %) and 
+    Calculate Black-Scholes Call Delta (N(d1)),
+    Probability of Expiring In-The-Money (ITM % = N(d2)), and 
     Probability of Hitting/Touching Strike Price before expiration (%).
     """
     if not S or not K or not iv_pct or iv_pct <= 0 or dte <= 0:
-        return None, None
+        return None, None, None
         
     try:
         sigma = iv_pct / 100.0
         T = dte / 365.0
         
-        d2 = (math.log(S / K) + (r - 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+        
+        delta = round(norm_cdf(d1), 3)
         prob_itm = norm_cdf(d2)
         
         prob_itm_pct = round(prob_itm * 100.0, 2)
         prob_touch_pct = round(min(100.0, 2.0 * prob_itm_pct), 2)
         
-        return prob_itm_pct, prob_touch_pct
+        return delta, prob_itm_pct, prob_touch_pct
     except Exception:
-        return None, None
+        return None, None, None
+
+def calculate_option_probabilities(S: float, K: float, iv_pct: float, dte: int, r: float = 0.045):
+    """Backward compatibility wrapper returning (prob_itm_pct, prob_touch_pct)."""
+    _, prob_itm, prob_touch = calculate_option_greeks_and_probabilities(S, K, iv_pct, dte, r)
+    return prob_itm, prob_touch
+
+import re
+
+POPULAR_SYMBOLS_MAP = {
+    'UBER': 'UBER',
+    'UBER TECHNOLOGIES': 'UBER',
+    'LYFT': 'LYFT',
+    'LYFT INC': 'LYFT',
+    'TESLA': 'TSLA',
+    'TSLA': 'TSLA',
+    'TESLA INC': 'TSLA',
+    'APPLE': 'AAPL',
+    'AAPL': 'AAPL',
+    'APPLE INC': 'AAPL',
+    'MICROSOFT': 'MSFT',
+    'MSFT': 'MSFT',
+    'MICROSOFT CORP': 'MSFT',
+    'NVIDIA': 'NVDA',
+    'NVDA': 'NVDA',
+    'NVIDIA CORP': 'NVDA',
+    'AMAZON': 'AMZN',
+    'AMZN': 'AMZN',
+    'AMAZON.COM': 'AMZN',
+    'GOOGLE': 'GOOGL',
+    'ALPHABET': 'GOOGL',
+    'GOOG': 'GOOGL',
+    'GOOGL': 'GOOGL',
+    'META': 'META',
+    'FACEBOOK': 'META',
+    'AMD': 'AMD',
+    'ADVANCED MICRO DEVICES': 'AMD',
+    'SPY': 'SPY',
+    'S&P 500': 'SPY',
+    'PLTR': 'PLTR',
+    'PALANTIR': 'PLTR',
+    'NETFLIX': 'NFLX',
+    'NFLX': 'NFLX',
+    'DISNEY': 'DIS',
+    'DIS': 'DIS',
+    'COINBASE': 'COIN',
+    'COIN': 'COIN',
+    'SOFI': 'SOFI',
+    'JPMORGAN': 'JPM',
+    'JPM': 'JPM',
+    'BERKSHIRE': 'BRK-B',
+    'BROADCOM': 'AVGO',
+    'AVGO': 'AVGO',
+    'ELI LILLY': 'LLY',
+    'LLY': 'LLY',
+    'COSTCO': 'COST',
+    'COST': 'COST'
+}
 
 def resolve_to_symbol(query: str) -> str:
-    """Convert company names (e.g., 'apple') to ticker symbols ('AAPL')."""
+    """Convert company names (e.g., 'uber', 'apple') to ticker symbols ('UBER', 'AAPL')."""
     cleaned = query.strip()
     if not cleaned:
         return cleaned
 
+    upper_clean = cleaned.upper()
+    # Fast path 1: Pre-mapped popular tickers and names
+    if upper_clean in POPULAR_SYMBOLS_MAP:
+        return POPULAR_SYMBOLS_MAP[upper_clean]
+
+    # Fast path 2: Standard US equity ticker pattern (1-5 letters, optional dot/dash)
+    if re.match(r'^[A-Z0-9.\-=]{1,5}$', upper_clean):
+        return upper_clean
+
+    # Fallback to Yahoo Finance search for multi-word queries
     url = f"https://query2.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(cleaned)}&quotesCount=5"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=4) as resp:
+        with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read().decode())
             quotes = data.get('quotes', [])
             for q in quotes:
@@ -55,7 +127,7 @@ def resolve_to_symbol(query: str) -> str:
     except Exception:
         pass
         
-    return cleaned.upper()
+    return upper_clean
 
 def calculate_covered_call_score(
     ann_max_roi_pct: float,
@@ -122,15 +194,26 @@ def fetch_ticker_data_cached(input_query: str):
         try:
             api_monitor.apply_throttle()
             info = ticker.fast_info
-            # Prioritize official regular market closing price as option chains reflect settlement at 4:00 PM ET
-            close_px = info.get('previousClose') or info.get('regularMarketPreviousClose') or info.get('lastPrice')
-            if close_px and not pd.isna(close_px) and float(close_px) > 0:
-                current_price = float(close_px)
+            if is_market_open_now():
+                live_px = info.get('lastPrice') or info.get('regularMarketPrice') or info.get('previousClose')
+            else:
+                live_px = info.get('lastPrice') or info.get('previousClose') or info.get('regularMarketPreviousClose')
+            if live_px and not pd.isna(live_px) and float(live_px) > 0:
+                current_price = float(live_px)
                 break
         except Exception:
-            pass
-        time.sleep(0.4 * (attempt + 1))
+            ticker = yf.Ticker(symbol)
+        time.sleep(0.2 * (attempt + 1))
         
+    if not current_price or pd.isna(current_price):
+        # Fallback to recent history
+        try:
+            hist = ticker.history(period="5d")
+            if not hist.empty and 'Close' in hist:
+                current_price = float(hist['Close'].iloc[-1])
+        except Exception:
+            pass
+
     if not current_price or pd.isna(current_price):
         lat = (time.time() - t0) * 1000.0
         api_monitor.record_api_call("FastInfo", symbol, False, lat, "Price not found")
@@ -142,12 +225,13 @@ def fetch_ticker_data_cached(input_query: str):
     for attempt in range(3):
         try:
             api_monitor.apply_throttle()
-            expirations = ticker.options
-            if expirations and len(expirations) > 0:
+            opts = ticker.options
+            if opts and len(opts) > 0:
+                expirations = list(opts)
                 break
         except Exception:
-            pass
-        time.sleep(0.4 * (attempt + 1))
+            ticker = yf.Ticker(symbol)
+        time.sleep(0.2 * (attempt + 1))
     
     lat = (time.time() - t0) * 1000.0
     if not expirations:
@@ -203,6 +287,28 @@ def get_nearest_strike(available_strikes, target_price):
         return min(available_strikes, key=lambda s: abs(s - target_price))
     return min(valid_strikes, key=lambda s: abs(s - target_price))
 
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_option_chain_cached(symbol: str, exp_date_str: str) -> Optional[pd.DataFrame]:
+    """Fetch option calls table for a given expiration with caching and retries."""
+    ticker = yf.Ticker(symbol)
+    t_opt = time.time()
+    for attempt in range(3):
+        try:
+            api_monitor.apply_throttle()
+            chain = ticker.option_chain(exp_date_str)
+            if chain is not None and chain.calls is not None and not chain.calls.empty:
+                lat_opt = (time.time() - t_opt) * 1000.0
+                api_monitor.record_api_call(f"Chain ({exp_date_str})", symbol, True, lat_opt)
+                return chain.calls
+        except Exception:
+            ticker = yf.Ticker(symbol)
+        time.sleep(0.2 * (attempt + 1))
+    
+    lat_opt = (time.time() - t_opt) * 1000.0
+    api_monitor.record_api_call(f"Chain ({exp_date_str})", symbol, False, lat_opt, "Empty call table")
+    return None
+
+@st.cache_data(ttl=900, show_spinner=False)
 def screen_covered_calls(input_query: str, custom_purchase_price: float = None):
     """Fetch stock price, options data, and calculate ROIs supporting names and symbols."""
     symbol, current_price, earnings_date, expirations = fetch_ticker_data_cached(input_query)
@@ -211,28 +317,10 @@ def screen_covered_calls(input_query: str, custom_purchase_price: float = None):
     target_exps = find_target_expirations(expirations)
     results = []
 
-    ticker = yf.Ticker(symbol)
-
     for term_label, (exp_date_str, dte) in target_exps.items():
-        chain = None
-        t_opt = time.time()
-        for attempt in range(3):
-            try:
-                api_monitor.apply_throttle()
-                chain = ticker.option_chain(exp_date_str)
-                if chain is not None and chain.calls is not None and not chain.calls.empty:
-                    lat_opt = (time.time() - t_opt) * 1000.0
-                    api_monitor.record_api_call(f"Chain ({exp_date_str})", symbol, True, lat_opt)
-                    break
-            except Exception:
-                time.sleep(0.4)
-        
-        if chain is None or chain.calls is None or chain.calls.empty:
-            lat_opt = (time.time() - t_opt) * 1000.0
-            api_monitor.record_api_call(f"Chain ({exp_date_str})", symbol, False, lat_opt, "Empty call table")
+        calls = fetch_option_chain_cached(symbol, exp_date_str)
+        if calls is None or calls.empty:
             continue
-        
-        calls = chain.calls
         strikes = calls['strike'].values
         targets = [
             ('5% OTM', ref_price * 1.05),
@@ -254,8 +342,6 @@ def screen_covered_calls(input_query: str, custom_purchase_price: float = None):
             iv_pct = round(float(iv_raw) * 100.0, 2) if (iv_raw is not None and not pd.isna(iv_raw)) else None
 
             delta_raw = option_row.get('delta', None)
-            delta_val = round(float(delta_raw), 3) if (delta_raw is not None and not pd.isna(delta_raw)) else None
-            
             premium = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else last_price
             if premium <= 0:
                 continue
@@ -270,7 +356,8 @@ def screen_covered_calls(input_query: str, custom_purchase_price: float = None):
             breakeven = ref_price - premium
             cushion_pct = round((premium / ref_price) * 100.0, 2)
             
-            prob_itm_pct, prob_touch_pct = calculate_option_probabilities(ref_price, strike, iv_pct, dte)
+            delta_calc, prob_itm_pct, prob_touch_pct = calculate_option_greeks_and_probabilities(ref_price, strike, iv_pct, dte)
+            delta_val = delta_calc if delta_calc is not None else (round(float(delta_raw), 3) if (delta_raw is not None and not pd.isna(delta_raw)) else None)
             score = calculate_covered_call_score(ann_max_roi, cushion_pct, prob_itm_pct, dte, earnings_date)
 
             results.append({

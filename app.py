@@ -12,7 +12,7 @@ from database import (
     save_subscriber, get_subscribers
 )
 from weekly_scanner import run_weekly_scan, TOP_50_SPY
-from api_monitor import api_monitor, is_market_open_now, is_snapshot_frozen_after_market_close
+from api_monitor import api_monitor, is_market_open_now, is_snapshot_frozen_after_market_close, is_snapshot_fresh
 
 st.set_page_config(
     page_title="Covered Call Screener & Yield Engine",
@@ -40,14 +40,31 @@ with st.sidebar:
     st.markdown("### Stock Selection")
     
     # Quick Pick Pills for Rapid Trade Analysis
-    popular_tickers = ["AAPL", "NVDA", "TSLA", "MSFT", "SPY", "AMD"]
-    selected_pill = st.pills("Quick Picks", popular_tickers, default=None)
+    popular_tickers = ["AAPL", "NVDA", "TSLA", "MSFT", "UBER", "LYFT", "SPY", "AMD"]
     
-    default_ticker = selected_pill if selected_pill else "AAPL"
+    if "selected_ticker" not in st.session_state:
+        st.session_state["selected_ticker"] = "AAPL"
+        
+    def on_pill_change():
+        if st.session_state.get("quick_pill_select"):
+            chosen = st.session_state["quick_pill_select"]
+            st.session_state["ticker_text_input"] = chosen
+            st.session_state["selected_ticker"] = chosen
+
+    st.pills(
+        "Quick Picks", 
+        popular_tickers, 
+        key="quick_pill_select", 
+        on_change=on_pill_change
+    )
+    
+    if "ticker_text_input" not in st.session_state:
+        st.session_state["ticker_text_input"] = st.session_state.get("selected_ticker", "AAPL")
+        
     ticker_input = st.text_input(
         "Ticker Symbol or Company Name",
-        value=default_ticker,
-        help="Enter any US stock ticker (e.g. AAPL, NVDA, TSLA) or company name."
+        key="ticker_text_input",
+        help="Enter any US stock ticker (e.g. AAPL, NVDA, TSLA, UBER, LYFT) or company name."
     ).strip()
 
     use_custom_cost = st.checkbox("Custom Purchase Price", help="Calculate yields against your personal purchase price instead of current market price.")
@@ -77,7 +94,7 @@ last_mode = st.session_state.get('last_mode')
 should_run = (
     run_button or 
     'results' not in st.session_state or 
-    ticker_input.upper() != str(last_ticker).upper() or 
+    (ticker_input and ticker_input.upper() != str(last_ticker).upper()) or 
     custom_price != last_price or
     data_mode != last_mode
 )
@@ -86,15 +103,17 @@ if should_run and ticker_input:
     st.session_state['last_ticker'] = ticker_input
     st.session_state['last_price'] = custom_price
     st.session_state['last_mode'] = data_mode
+    st.session_state['last_error'] = None
     
     symbol_resolved = resolve_to_symbol(ticker_input)
     is_live_requested = (data_mode == "🔄 Live Market Refresh")
     
     loaded_from_db = False
     existing_snapshot = get_latest_snapshot(symbol_resolved)
+    is_fresh = is_snapshot_fresh(existing_snapshot[0]['timestamp'], max_age_minutes=30) if existing_snapshot else False
     
-    # 1. Market-Closed Smart Freeze Rule:
-    if existing_snapshot and is_snapshot_frozen_after_market_close(existing_snapshot[0]['timestamp']):
+    # 1. Fresh Database Snapshot (<= 30 min during market hours, or post-close when market closed)
+    if existing_snapshot and is_fresh and not is_live_requested:
         snap_meta, snap_results = existing_snapshot
         symbol = snap_meta['ticker']
         curr_price = snap_meta['current_price']
@@ -104,30 +123,16 @@ if should_run and ticker_input:
         snapshot_id = snap_meta['id']
         snap_time = snap_meta['timestamp']
         
-        api_monitor.record_cache_hit(symbol, "Market Closed Freeze")
-        st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "market_closed_freeze", snap_time)
+        source_label = "market_closed_freeze" if not is_market_open_now() else "db_fresh"
+        api_monitor.record_cache_hit(symbol, "Fresh Database Snapshot (<= 30m)")
+        st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, source_label, snap_time)
         loaded_from_db = True
 
-    # 2. If user specifically requested Fast Database Snapshot and snapshot exists
-    elif not is_live_requested and existing_snapshot:
-        snap_meta, snap_results = existing_snapshot
-        symbol = snap_meta['ticker']
-        curr_price = snap_meta['current_price']
-        ref_price = custom_price if (custom_price and custom_price > 0) else snap_meta['purchase_price']
-        earnings_date = snap_meta.get('earnings_date', 'N/A')
-        results = snap_results
-        snapshot_id = snap_meta['id']
-        snap_time = snap_meta['timestamp']
+    # 2. Otherwise: Snapshot is stale (> 30m during market hours), Live requested, or no snapshot exists
+    if not loaded_from_db:
+        slot_ok, slot_reason, wait_sec = api_monitor.acquire_request_slot(symbol_resolved)
         
-        api_monitor.record_cache_hit(symbol, "User Fast DB Mode")
-        st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "db", snap_time)
-        loaded_from_db = True
-
-    # 3. Live Option Chain Screening
-    else:
-        can_proceed, limit_reason = api_monitor.can_make_api_call(symbol_resolved)
-        
-        if not can_proceed:
+        if not slot_ok:
             if existing_snapshot:
                 snap_meta, snap_results = existing_snapshot
                 symbol = snap_meta['ticker']
@@ -138,14 +143,16 @@ if should_run and ticker_input:
                 snapshot_id = snap_meta['id']
                 snap_time = snap_meta['timestamp']
                 
-                api_monitor.record_cache_hit(symbol, f"Rate Limit Fallback ({limit_reason})")
-                st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "rate_limit_fallback", snap_time, limit_reason)
+                api_monitor.record_cache_hit(symbol, f"Rate Limit / Busy Fallback ({slot_reason})")
+                st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "rate_limit_busy_fallback", snap_time, slot_reason, wait_sec)
                 loaded_from_db = True
             else:
-                st.error(f"⚠️ **Rate Limit**: {limit_reason}. No prior database snapshot found for '{symbol_resolved}'.")
-        
-        if not loaded_from_db and can_proceed:
-            with st.spinner(f"🔍 Screening live option chains for {symbol_resolved}..."):
+                st.session_state.pop('results', None)
+                st.session_state['last_error'] = f"⏳ **API Busy / Rate Limiter Active**: {slot_reason}. Please wait **{wait_sec}s** before retrying."
+                st.error(st.session_state['last_error'])
+                
+        if not loaded_from_db and slot_ok:
+            with st.spinner(f"🔍 Fetching fresh option chains for {symbol_resolved}..."):
                 try:
                     symbol, curr_price, ref_price, earnings_date, results = screen_covered_calls(
                         ticker_input, custom_purchase_price=custom_price
@@ -166,7 +173,11 @@ if should_run and ticker_input:
                         api_monitor.record_cache_hit(symbol, "Error Recovery Snapshot")
                         st.session_state['results'] = (symbol, ticker_input, curr_price, ref_price, earnings_date, results, snapshot_id, "error_fallback", snap_time)
                     else:
-                        st.error(f"Could not fetch options data for '{ticker_input}': {str(e)}")
+                        st.session_state.pop('results', None)
+                        st.session_state['last_error'] = f"Could not fetch options data for '{ticker_input}': {str(e)}"
+                        st.error(st.session_state['last_error'])
+                finally:
+                    api_monitor.release_request_slot()
 
 # Helper for newsletter generation
 def generate_newsletter_markdown(weekly_data: dict) -> str:
@@ -348,7 +359,7 @@ with tab_weekly:
         
         cols = [
             'rank', 'ticker', 'stock_price', 'strike_price', 'term', 'expiration_date',
-            'premium', 'premium_roi_pct', 'ann_max_roi_pct', 'cushion_pct', 'prob_itm_pct', 'score', 'generated_at'
+            'premium', 'premium_roi_pct', 'ann_max_roi_pct', 'cushion_pct', 'delta', 'prob_itm_pct', 'score', 'generated_at'
         ]
         available_cols = [c for c in cols if c in df_picks.columns]
         table_df = df_picks[available_cols].copy()
@@ -364,6 +375,7 @@ with tab_weekly:
             'premium_roi_pct': 'Premium ROI (%)',
             'ann_max_roi_pct': 'Ann. Max ROI (%)',
             'cushion_pct': 'Cushion (%)',
+            'delta': 'Delta',
             'prob_itm_pct': 'Prob. ITM (%)',
             'score': 'Score (0-100)',
             'generated_at': 'Captured At'
@@ -433,22 +445,27 @@ with tab_live:
         # Prominent Timestamp & Data Origin Banner
         if source == "market_closed_freeze":
             st.info(f"🕒 **Data Sourced**: `{snap_time}` | 🔒 **Market Closed**: Option prices reflect regular session settlement. Served closing snapshot (0 API calls).")
-        elif source == "db":
-            st.info(f"🕒 **Data Sourced**: `{snap_time}` | **Origin**: Saved Database Snapshot (Snapshot #{snapshot_id})")
+        elif source in ["db", "db_fresh"]:
+            st.info(f"🕒 **Data Sourced**: `{snap_time}` | ⚡ **Fresh Snapshot**: Captured within the last 30 minutes (Snapshot #{snapshot_id}, 0 API calls).")
+        elif source == "rate_limit_busy_fallback":
+            status_msg = res_data[9] if len(res_data) > 9 else "API busy"
+            wait_s = res_data[10] if len(res_data) > 10 else 3
+            st.warning(f"⏳ **API Busy / Rate Limiter Active**: {status_msg}. Please wait **{wait_s}s** before refreshing. Showing latest saved snapshot from `{snap_time}` (Snapshot #{snapshot_id}).")
         elif source == "rate_limit_fallback":
             limit_reason = res_data[9] if len(res_data) > 9 else "Rate limit active"
             st.warning(f"🕒 **Data Sourced**: `{snap_time}` | 🛡️ **Protection**: {limit_reason}. Loaded verified Database Snapshot (#{snapshot_id}).")
         elif source == "error_fallback":
             st.warning(f"🕒 **Data Sourced**: `{snap_time}` | ⚠️ Live API throttled. Loaded latest verified Database Snapshot (#{snapshot_id}).")
         else:
-            st.success(f"🕒 **Data Sourced**: `{snap_time}` | **Origin**: Live Real-Time Market Quote (Saved as Snapshot #{snapshot_id})")
+            st.success(f"🕒 **Data Sourced**: `{snap_time}` | 🟢 **Live Market Quote**: Fresh market options captured (Saved as Snapshot #{snapshot_id}).")
 
         # Key KPI Metrics Cards
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
         with kpi1:
             st.metric("Stock Symbol", symbol)
         with kpi2:
-            st.metric("Closing Market Price", f"${curr_price:.2f}")
+            price_label = "Live Market Price" if is_market_open_now() else "Closing Market Price"
+            st.metric(price_label, f"${curr_price:.2f}")
         with kpi3:
             st.metric("Reference Cost Basis", f"${ref_price:.2f}", help="Cost basis used for yield and ROI calculations")
         with kpi4:
@@ -570,6 +587,11 @@ with tab_live:
             st.dataframe(hist_df, width="stretch", hide_index=True)
         else:
             st.info(f"No historical records saved for {symbol} yet.")
+    elif st.session_state.get('last_error'):
+        st.error(st.session_state['last_error'])
+        st.info("💡 Please verify the ticker symbol or try switching to **🔄 Live Market Refresh**.")
+    else:
+        st.info("👈 Enter a stock ticker or select a quick pick from the sidebar to screen covered calls.")
 
 # ----------------- TAB 3: QUANTITATIVE METHODOLOGY -----------------
 with tab_methodology:
@@ -587,12 +609,19 @@ with tab_methodology:
 
     ---
 
-    ### 2. Black-Scholes In-The-Money Probability ($N(d_2)$)
+    ### 2. Black-Scholes Call Delta ($\Delta = N(d_1)$)
+    The Black-Scholes Delta measures the rate of change of option value per \$1 move in the underlying stock price:
+    $$d_1 = \frac{\ln(S / K) + (r + \frac{1}{2}\sigma^2)T}{\sigma \sqrt{T}}$$
+    $$\Delta_{\text{call}} = N(d_1) = \frac{1}{2} \left[ 1 + \text{erf}\left(\frac{d_1}{\sqrt{2}}\right) \right]$$
+
+    ---
+
+    ### 3. Black-Scholes In-The-Money Probability ($N(d_2)$)
     The probability that an Out-of-the-Money call option expires In-The-Money (ITM) under risk-neutral Black-Scholes dynamics is given by $N(d_2)$:
-    $$d_2 = \frac{\ln(S / K) + (r - \frac{1}{2}\sigma^2)T}{\sigma \sqrt{T}}$$
+    $$d_2 = d_1 - \sigma \sqrt{T} = \frac{\ln(S / K) + (r - \frac{1}{2}\sigma^2)T}{\sigma \sqrt{T}}$$
     $$\text{Prob. ITM} = N(d_2) = \frac{1}{2} \left[ 1 + \text{erf}\left(\frac{d_2}{\sqrt{2}}\right) \right]$$
     Where:
-    - $S$ = Stock Reference Price (Closing Settlement)
+    - $S$ = Stock Reference Price
     - $K$ = Option Strike Price
     - $\sigma$ = Implied Volatility ($\text{IV} / 100$)
     - $T = \text{DTE} / 365$ (Time to expiration in years)
@@ -600,13 +629,13 @@ with tab_methodology:
 
     ---
 
-    ### 3. Probability of Touching / Hitting Strike Price
+    ### 4. Probability of Touching / Hitting Strike Price
     By the **Reflection Principle** of Brownian motion with drift, the probability that the underlying stock price touches or exceeds the strike price $K$ at *any point* prior to expiration is approximately:
     $$\text{Prob. Hit Strike} \approx \min\left(100\%, 2 \times N(d_2)\right)$$
 
     ---
 
-    ### 4. Covered Call Yield & ROI Metrics
+    ### 5. Covered Call Yield & ROI Metrics
     - **Premium Yield (%)**: $\frac{\text{Option Premium}}{\text{Reference Price}} \times 100$
     - **Annualized Premium Yield (%)**: $\text{Premium Yield} \times \frac{365}{\text{DTE}}$
     - **Max ROI (%)**: $\frac{(K - \text{Reference Price}) + \text{Option Premium}}{\text{Reference Price}} \times 100$

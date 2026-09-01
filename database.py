@@ -491,9 +491,10 @@ def save_weekly_top_picks(batch_id: str, picks_5pct: List[Dict[str, Any]], picks
                     )
                 ''')
                 for row in all_picks:
+                    row_gen_at = row.get("generated_at") or timestamp
                     conn.execute(insert_stmt, {
                         "batch_id": batch_id,
-                        "gen_at": timestamp,
+                        "gen_at": row_gen_at,
                         "target_type": row.get("target_type", "5% OTM"),
                         "rank": row.get("rank", 1),
                         "ticker": row["ticker"].upper(),
@@ -526,6 +527,7 @@ def save_weekly_top_picks(batch_id: str, picks_5pct: List[Dict[str, Any]], picks
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     for row in all_picks:
+        row_gen_at = row.get("generated_at") or timestamp
         cursor.execute('''
             INSERT INTO weekly_top_picks (
                 batch_id, generated_at, target_type, rank, ticker, stock_price,
@@ -535,7 +537,7 @@ def save_weekly_top_picks(batch_id: str, picks_5pct: List[Dict[str, Any]], picks
                 breakeven_price, cushion_pct, score, earnings_date
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            batch_id, timestamp, row.get("target_type", "5% OTM"), row.get("rank", 1),
+            batch_id, row_gen_at, row.get("target_type", "5% OTM"), row.get("rank", 1),
             row["ticker"].upper(), float(row.get("stock_price", 0.0)), row.get("term", ""), row.get("expiration_date", ""),
             int(row.get("dte", 0)), float(row.get("strike_price", 0.0)), float(row.get("bid", 0.0) or 0.0), float(row.get("ask", 0.0) or 0.0), float(row.get("premium", 0.0)),
             row.get("implied_volatility_pct"), row.get("delta"), row.get("prob_itm_pct"), row.get("prob_touch_pct"),

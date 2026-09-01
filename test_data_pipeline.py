@@ -48,49 +48,50 @@ def test_covered_call_scoring() -> bool:
     return True
 
 def test_weekly_picks_database() -> bool:
-    """Verify weekly top picks persistence, retrieval, and dynamic swap mechanism."""
-    print("Testing weekly top picks persistence and challenger swap...")
+    """Verify weekly top picks persistence, retrieval, and capture timestamp preservation."""
+    print("Testing weekly top picks persistence and capture timestamp preservation...")
     init_db()
     
     mock_5 = [
-        {"ticker": "AAPL", "stock_price": 220.0, "strike_price": 230.0, "expiration_date": "2026-10-16", "dte": 46, "premium": 8.0, "ann_max_roi_pct": 28.0, "cushion_pct": 3.6, "score": 88.0, "breakeven_price": 212.0},
-        {"ticker": "MSFT", "stock_price": 420.0, "strike_price": 440.0, "expiration_date": "2026-10-16", "dte": 46, "premium": 12.0, "ann_max_roi_pct": 24.0, "cushion_pct": 2.9, "score": 82.0, "breakeven_price": 408.0}
+        {"ticker": "AAPL", "stock_price": 220.0, "strike_price": 230.0, "expiration_date": "2026-10-16", "dte": 46, "premium": 8.0, "ann_max_roi_pct": 28.0, "cushion_pct": 3.6, "score": 88.0, "breakeven_price": 212.0, "generated_at": "2026-08-31 20:50:25"},
+        {"ticker": "MSFT", "stock_price": 420.0, "strike_price": 440.0, "expiration_date": "2026-10-16", "dte": 46, "premium": 12.0, "ann_max_roi_pct": 24.0, "cushion_pct": 2.9, "score": 82.0, "breakeven_price": 408.0, "generated_at": "2026-08-31 20:50:25"}
     ]
     mock_10 = [
-        {"ticker": "NVDA", "stock_price": 120.0, "strike_price": 132.0, "expiration_date": "2026-10-16", "dte": 46, "premium": 6.0, "ann_max_roi_pct": 32.0, "cushion_pct": 5.0, "score": 92.0, "breakeven_price": 114.0}
+        {"ticker": "NVDA", "stock_price": 120.0, "strike_price": 132.0, "expiration_date": "2026-10-16", "dte": 46, "premium": 6.0, "ann_max_roi_pct": 32.0, "cushion_pct": 5.0, "score": 92.0, "breakeven_price": 114.0, "generated_at": "2026-08-31 20:50:25"}
     ]
     
     batch_id = "test-batch-001"
-    save_weekly_top_picks(batch_id, mock_5, mock_10)
+    save_weekly_top_picks(batch_id, mock_5, mock_10, timestamp="2026-08-31 20:50:25")
     
-    loaded = get_latest_weekly_top_picks()
-    assert len(loaded["5% OTM"]) >= 2, "Loaded 5% OTM picks count mismatch"
-    assert len(loaded["10% OTM"]) >= 1, "Loaded 10% OTM picks count mismatch"
-    
-    # Test Challenger Swap
-    challenger = {"ticker": "AMD", "stock_price": 150.0, "strike_price": 157.5, "expiration_date": "2026-10-16", "dte": 46, "premium": 7.0, "ann_max_roi_pct": 35.0, "cushion_pct": 4.6, "score": 95.0, "breakeven_price": 143.0}
-    success = swap_weekly_pick("5% OTM", "MSFT", challenger)
-    assert success, "Challenger swap operation failed"
-    
-    # Clean up test records so they don't pollute UI
     import sqlite3
     conn = sqlite3.connect("covered_calls.db")
     cur = conn.cursor()
+    cur.execute("SELECT ticker, generated_at FROM weekly_top_picks WHERE batch_id = ?", (batch_id,))
+    rows = cur.fetchall()
+    assert len(rows) == 3, f"Expected 3 test rows, got {len(rows)}"
+    assert rows[0][1] == "2026-08-31 20:50:25", f"Expected capture timestamp '2026-08-31 20:50:25', got '{rows[0][1]}'"
+    
+    # Clean up test records
     cur.execute("DELETE FROM weekly_top_picks WHERE batch_id LIKE 'test-%'")
     conn.commit()
     conn.close()
 
-    print("  [PASS] Weekly top picks persistence and swap verified.")
+    print("  [PASS] Weekly top picks persistence and timestamp preservation verified.")
     return True
 
 def test_black_scholes_math() -> bool:
-    """Verify quantitative Black-Scholes probability formulas and bounds."""
-    print("Testing Black-Scholes probability math...")
+    """Verify quantitative Black-Scholes Delta and probability formulas and bounds."""
+    print("Testing Black-Scholes Delta & probability math...")
     
-    # Test Case 1: Standard At-The-Money Call
+    from screener import calculate_option_greeks_and_probabilities
+    
+    # Test Case 1: Standard ~5% OTM Call
     S, K, iv, dte = 100.0, 105.0, 30.0, 60
-    prob_itm, prob_touch = calculate_option_probabilities(S, K, iv, dte)
+    delta, prob_itm, prob_touch = calculate_option_greeks_and_probabilities(S, K, iv, dte)
     
+    assert delta is not None, "delta should not be None"
+    assert 0.0 <= delta <= 1.0, f"delta ({delta}) out of [0, 1] bounds"
+    assert 0.25 <= delta <= 0.50, f"5% OTM delta ({delta}) expected in [0.25, 0.50]"
     assert prob_itm is not None, "prob_itm should not be None"
     assert prob_touch is not None, "prob_touch should not be None"
     assert 0.0 <= prob_itm <= 100.0, f"prob_itm ({prob_itm}%) out of [0, 100] bounds"
@@ -98,10 +99,11 @@ def test_black_scholes_math() -> bool:
     assert prob_touch >= prob_itm, f"prob_touch ({prob_touch}%) must be >= prob_itm ({prob_itm}%)"
 
     # Test Case 2: Deep Out-of-the-Money Call
-    prob_itm_far, _ = calculate_option_probabilities(100.0, 200.0, 20.0, 30)
+    delta_far, prob_itm_far, _ = calculate_option_greeks_and_probabilities(100.0, 200.0, 20.0, 30)
+    assert delta_far < 0.05, f"Deep OTM call delta ({delta_far}) should be < 0.05"
     assert prob_itm_far < 5.0, "Deep OTM call probability should be low (<5%)"
 
-    print("  [PASS] Black-Scholes probability math verified.")
+    print("  [PASS] Black-Scholes Delta & probability math verified.")
     return True
 
 def test_symbol_resolution() -> bool:

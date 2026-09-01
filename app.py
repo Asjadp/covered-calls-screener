@@ -21,6 +21,14 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Google Site Verification
+st.html(
+    """
+    <meta name="google-site-verification" content="google2cc9c81477b8b47c" />
+    <meta name="google-site-verification" content="google2cc9c81477b8b47c.html" />
+    """
+)
+
 # Initialize database schema (SQLite or Cloud PostgreSQL)
 init_db()
 db_status = get_db_status()

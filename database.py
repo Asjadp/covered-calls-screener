@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 from datetime import datetime
 import pandas as pd
@@ -545,6 +546,24 @@ def save_weekly_top_picks(batch_id: str, picks_5pct: List[Dict[str, Any]], picks
     conn.close()
     return batch_id
 
+def _seed_weekly_picks_if_empty() -> Dict[str, Any]:
+    """Auto-seed weekly top picks from bundled weekly_top_picks.json if database has no records."""
+    json_path = os.path.join(os.path.dirname(__file__), "data", "weekly_top_picks.json")
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                records = json.load(f)
+            if records:
+                gen_at = records[0].get("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                batch_id = "weekly-initial-seed"
+                picks_5 = [r for r in records if r.get("target_type") == "5% OTM" or r.get("list") == "+5% OTM"]
+                picks_10 = [r for r in records if r.get("target_type") == "10% OTM" or r.get("list") == "+10% OTM"]
+                save_weekly_top_picks(batch_id, picks_5, picks_10, timestamp=gen_at)
+                return {"5% OTM": picks_5, "10% OTM": picks_10, "batch_id": batch_id, "generated_at": gen_at}
+        except Exception as e:
+            print(f"[Warning] Auto-seeding from weekly_top_picks.json failed: {e}")
+    return {"5% OTM": [], "10% OTM": [], "batch_id": None, "generated_at": None}
+
 def get_latest_weekly_top_picks() -> Dict[str, Any]:
     """Retrieve the most recent batch of weekly top picks categorized by target type."""
     engine = _get_sqlalchemy_engine()
@@ -562,7 +581,7 @@ def get_latest_weekly_top_picks() -> Dict[str, Any]:
                         text("SELECT batch_id, generated_at FROM weekly_top_picks ORDER BY id DESC LIMIT 1")
                     ).mappings().first()
                 if not latest_batch_row:
-                    return {"5% OTM": [], "10% OTM": [], "batch_id": None, "generated_at": None}
+                    return _seed_weekly_picks_if_empty()
                 
                 b_id = latest_batch_row["batch_id"]
                 gen_at = latest_batch_row["generated_at"]
@@ -574,6 +593,8 @@ def get_latest_weekly_top_picks() -> Dict[str, Any]:
                 
                 picks_5 = [dict(r) for r in rows if r["target_type"] == "5% OTM"]
                 picks_10 = [dict(r) for r in rows if r["target_type"] == "10% OTM"]
+                if not picks_5 and not picks_10:
+                    return _seed_weekly_picks_if_empty()
                 return {"5% OTM": picks_5, "10% OTM": picks_10, "batch_id": b_id, "generated_at": gen_at}
         except Exception as e:
             print(f"[Warning] Loading weekly picks from cloud DB failed: {e}. Falling back to SQLite.")
@@ -592,7 +613,7 @@ def get_latest_weekly_top_picks() -> Dict[str, Any]:
         
     if not latest_batch_row:
         conn.close()
-        return {"5% OTM": [], "10% OTM": [], "batch_id": None, "generated_at": None}
+        return _seed_weekly_picks_if_empty()
         
     b_id = latest_batch_row["batch_id"]
     gen_at = latest_batch_row["generated_at"]
@@ -603,6 +624,8 @@ def get_latest_weekly_top_picks() -> Dict[str, Any]:
     
     picks_5 = [dict(r) for r in rows if r["target_type"] == "5% OTM"]
     picks_10 = [dict(r) for r in rows if r["target_type"] == "10% OTM"]
+    if not picks_5 and not picks_10:
+        return _seed_weekly_picks_if_empty()
     return {"5% OTM": picks_5, "10% OTM": picks_10, "batch_id": b_id, "generated_at": gen_at}
 
 def swap_weekly_pick(target_type: str, old_ticker: str, new_pick: Dict[str, Any]) -> bool:

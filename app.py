@@ -6,7 +6,6 @@ import os
 
 from screener import screen_covered_calls, resolve_to_symbol
 from database import init_db, save_screen_results, load_history, get_db_status, get_latest_snapshot
-from test_data_pipeline import load_sample_dataset, CSV_EXPORT_PATH, JSON_EXPORT_PATH
 from api_monitor import api_monitor, is_market_open_now, is_snapshot_frozen_after_market_close
 
 st.set_page_config(
@@ -33,7 +32,7 @@ with st.sidebar:
             **Dual-Backend Engine**:
             - **Local Persistence**: SQLite (`covered_calls.db`).
             - **Cloud Persistence**: Free **Supabase** or **Neon PostgreSQL** via `DATABASE_URL`.
-            All option scans are timestamped and indexed for backtesting.
+            All option scans are timestamped and indexed for trade analysis.
             """)
 
     st.markdown("### Stock Selection")
@@ -168,9 +167,8 @@ if should_run and ticker_input:
 st.title("📈 Covered Call Screener & Yield Engine")
 st.markdown("Quantitative Covered Call screening, Black-Scholes probability modeling, and multi-backend data persistence.")
 
-tab_live, tab_data_testing, tab_methodology = st.tabs([
+tab_live, tab_methodology = st.tabs([
     "🎯 Covered Call Screener & Yield Matrix",
-    "🧪 Benchmark Datasets & Backtesting",
     "📐 Quantitative Methodology & Formulas"
 ])
 
@@ -327,42 +325,7 @@ with tab_live:
         else:
             st.info(f"No historical records saved for {symbol} yet.")
 
-# ----------------- TAB 2: BENCHMARK DATASETS & BACKTESTING -----------------
-with tab_data_testing:
-    st.subheader("🧪 Benchmark Options Dataset for Offline Data Testing")
-    st.markdown("""
-    This section contains structured options datasets automatically captured and validated via the `test_data_pipeline.py` testing engine.
-    Recruiters and data testers can download or inspect these datasets to perform offline quantitative backtesting.
-    """)
-
-    sample_df = load_sample_dataset()
-    if not sample_df.empty:
-        col_t1, col_t2, col_t3 = st.columns(3)
-        col_t1.metric("Benchmark Stocks", f"{len(sample_df['ticker'].unique())} Unique Tickers")
-        col_t2.metric("Total Captured Contracts", f"{len(sample_df)} Option Rows")
-        col_t3.metric("Avg. Ann. Premium Yield", f"{sample_df['ann_premium_roi_pct'].mean():.2f}%")
-
-        st.dataframe(sample_df, width="stretch")
-
-        col_d1, col_d2 = st.columns(2)
-        with col_d1:
-            st.download_button(
-                label="📥 Download Benchmark Dataset (CSV)",
-                data=open(CSV_EXPORT_PATH, "rb").read() if os.path.exists(CSV_EXPORT_PATH) else b"",
-                file_name="sample_options_dataset.csv",
-                mime="text/csv"
-            )
-        with col_d2:
-            st.download_button(
-                label="📥 Download Benchmark Dataset (JSON)",
-                data=open(JSON_EXPORT_PATH, "rb").read() if os.path.exists(JSON_EXPORT_PATH) else b"",
-                file_name="sample_options_dataset.json",
-                mime="application/json"
-            )
-    else:
-        st.info("No benchmark dataset found. Run `python test_data_pipeline.py` to generate the test datasets.")
-
-# ----------------- TAB 3: QUANTITATIVE METHODOLOGY -----------------
+# ----------------- TAB 2: QUANTITATIVE METHODOLOGY -----------------
 with tab_methodology:
     st.subheader("📐 Quantitative Formulas & Mathematical Modeling")
     

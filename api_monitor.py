@@ -87,7 +87,7 @@ class APITelemetry:
         self.recent_logs: List[Dict[str, Any]] = []
         self.recent_request_timestamps: List[float] = []
 
-    def can_make_api_call(self) -> Tuple[bool, str]:
+    def can_make_api_call(self, symbol: Optional[str] = None) -> Tuple[bool, str]:
         """Check both session cap and 5 req/min rolling burst limit."""
         with self._lock:
             if self.api_calls >= SESSION_API_CAP:

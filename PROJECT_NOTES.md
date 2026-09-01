@@ -6,45 +6,51 @@
 ---
 
 ## 📌 Project Overview
-A Streamlit web application, Black-Scholes quantitative probability modeling engine, and multi-backend historical database system for screening stock Covered Calls using `yfinance`. It calculates yield metrics, option Greeks (IV & Delta), and Black-Scholes probabilities, storing screening snapshots for historical backtesting and visual ROI comparisons.
+A quantitative Python web application, options mathematical engine, and historical database system for screening stock Covered Calls using `yfinance`, Streamlit, Plotly, SQLite, and cloud PostgreSQL (Supabase/Neon). It calculates yield metrics, option Greeks (IV & Delta), and Black-Scholes risk-neutral probabilities, featuring intelligent rate-limiting and market-hours caching.
 
 ---
 
-## 📁 Key Components & Files
+## 📁 Key Components & Architecture
 
-1. **`screener.py`**:
-   - Resolves company names (e.g. `'apple'`) to tickers (`'AAPL'`).
-   - Identifies target expiration dates closest to 60 days (~2-month) and 90 days (~3-month).
-   - Finds nearest strikes for **+5% OTM** and **+10% OTM** targets.
-   - **Yield Calculations**: Premium Yield (%), Ann. Premium Yield (%), Max ROI (%), Ann. Max ROI (%), Breakeven ($).
-   - **Option Metrics**: Implied Volatility (`IV %`) and Delta.
-   - **Quantitative Probabilities (Black-Scholes)**:
-     - `norm_cdf(x)`: Standard normal cumulative distribution using `math.erf()`.
-     - `Prob. ITM (%)`: $N(d_2)$ probability of expiring in-the-money.
-     - `Prob. Hit Strike (%)`: $\min(100\%, 2 \times N(d_2))$ probability of stock price touching/hitting strike price at any point before expiration.
-   - Includes 5-min caching (`@st.cache_data`) and rate-limiting pauses.
+1. **`app.py`**:
+   - Streamlit interactive web dashboard with 2 focused tabs:
+     - **Tab 1: 🎯 Covered Call Screener & Yield Matrix**: Quick-pick pills (`AAPL`, `NVDA`, `TSLA`, `MSFT`, `SPY`, `AMD`), live metrics, options table, CSV export, Plotly comparison charts, and historical snapshots.
+     - **Tab 2: 📐 Quantitative Methodology & Formulas**: LaTeX formulas for Black-Scholes $N(d_2)$, Strike Touch probability, and yield calculations.
+   - Prominent **Data Sourced Timestamp** banner with origin indicators (`Database Snapshot` vs `Real-Time Live Quote`).
+   - Clean UI with all rate limiting and controls handled invisibly in the background.
 
-2. **`database.py`**:
-   - Manages unified multi-backend data storage: **PostgreSQL (Supabase / Neon)** in the cloud and **SQLite (`covered_calls.db`)** locally.
-   - Tables: `stock_snapshots` and `option_results`.
-   - **Auto-Migration**: Checks existing columns and executes auto-migrations on startup so upgrading database schemas never causes data loss.
-   - Functions: `init_db()`, `save_screen_results()`, `load_history()`, `get_db_status()`.
+2. **`screener.py`**:
+   - Ticker and company name resolution.
+   - Dynamic expiration target selection (~60-day & ~90-day cycles) and OTM strike resolution (+5% & +10% OTM).
+   - Quantitative mathematical calculations:
+     - Implied Volatility (`IV %`) & Delta.
+     - `Prob. ITM (%)` ($N(d_2)$) & `Prob. Hit Strike (%)` ($\approx 2 \times N(d_2)$).
+     - Premium Yield (%), Ann. Premium Yield (%), Max ROI (%), Ann. Max ROI (%), and Breakeven ($).
+   - In-memory 15-minute caching (`@st.cache_data(ttl=900)`).
+   - 3-attempt exponential backoff retry loop for Yahoo Finance API stability.
 
-3. **`test_data_pipeline.py`**:
-   - Automated data testing suite that verifies `yfinance` connectivity, option chains, and Black-Scholes formulas.
-   - Captures benchmark baskets (`AAPL`, `MSFT`, `NVDA`, `TSLA`, `SPY`) and exports sample datasets:
-     - `data/sample_options_dataset.csv`
-     - `data/sample_options_dataset.json`
+3. **`database.py`**:
+   - Unified multi-backend persistence: **Local SQLite (`covered_calls.db`)** by default, with auto-detection for free **Cloud PostgreSQL (Supabase / Neon)** via `DATABASE_URL`.
+   - Tables: `stock_snapshots` and `option_results` with automated column migrations.
+   - Functions: `init_db()`, `save_screen_results()`, `load_history()`, `get_latest_snapshot()`, `get_db_status()`.
 
-4. **`app.py`**:
-   - Streamlit interactive web dashboard featuring 3 dedicated tabs:
-     - **Tab 1: Live Option Screener**: Quick-pick pills (`AAPL`, `NVDA`, `TSLA`, etc.), metrics, data tables, Plotly comparison charts, and historical snapshots.
-     - **Tab 2: Data Testing & Benchmark Datasets**: Offline benchmark dataset viewer & 1-click CSV/JSON exports.
-     - **Tab 3: Quantitative Methodology**: Interactive LaTeX breakdown of Black-Scholes formulas and covered call equations.
-   - Storage backend indicator showing active SQLite or Cloud DB connection.
+4. **`api_monitor.py` (Background Traffic & Rate Limiting Engine)**:
+   - **Market-Closed Smart Freeze**: When US markets are closed (after 4:00 PM ET or weekends), once a closing snapshot is captured, 0 API calls are made for that ticker until the next market open at 9:30 AM ET.
+   - **Burst Rate Limiting**: Maximum 5 live calls per 60-second rolling window.
+   - **Session Cap**: Maximum 10 live calls per session.
+   - **Cooldown Delay**: Enforces 1.2-second pause between sequential requests.
+   - **Automatic DB Fallback**: Seamlessly loads verified database snapshots if rate limits or API throttles are encountered.
 
-5. **`.streamlit/config.toml` & `secrets.toml.example`**:
-   - Production UI theme and secrets configuration template for Cloud PostgreSQL.
+5. **`test_data_pipeline.py` & `data/`**:
+   - Local automated testing suite validating `yfinance` connectivity, option chains, and Black-Scholes math.
+   - Generates benchmark test datasets (`data/sample_options_dataset.csv` and `.json`).
+
+6. **Deployment & Config Files**:
+   - `requirements.txt`: Production dependencies (`streamlit`, `yfinance`, `pandas`, `plotly`, `SQLAlchemy`, etc.).
+   - `.gitignore`: Ignoring caches, virtual environments, and secrets.
+   - `.streamlit/config.toml`: Clean financial dashboard dark theme.
+   - `.streamlit/secrets.toml.example`: Template for Supabase/Neon connection URI.
+   - `LICENSE`: MIT License.
 
 ---
 
@@ -52,16 +58,18 @@ A Streamlit web application, Black-Scholes quantitative probability modeling eng
 
 1. **Push to GitHub**:
    ```powershell
-   git init
-   git add .
-   git commit -m "feat: complete covered call screener with cloud persistence and data testing"
-   git branch -M main
    git remote add origin https://github.com/asjadp/covered-calls-screener.git
    git push -u origin main
    ```
 
 2. **Deploy on Streamlit Cloud**:
-   - Visit [share.streamlit.io](https://share.streamlit.io/)
-   - Log in with GitHub username `asjadp`
-   - Select repository `asjadp/covered-calls-screener`, branch `main`, file `app.py`
+   - Go to [share.streamlit.io](https://share.streamlit.io/)
+   - Sign in with GitHub (`asjadp`)
+   - Select repository `asjadp/covered-calls-screener`, branch `main`, main file `app.py`
    - Deploy!
+
+3. **(Optional) Connect Free Supabase / Neon Cloud Database**:
+   - In Streamlit Cloud **App Settings > Secrets**:
+     ```toml
+     DATABASE_URL = "postgresql://postgres:[PASSWORD]@[HOST]:5432/postgres"
+     ```

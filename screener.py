@@ -57,6 +57,56 @@ def resolve_to_symbol(query: str) -> str:
         
     return cleaned.upper()
 
+def calculate_covered_call_score(
+    ann_max_roi_pct: float,
+    cushion_pct: float,
+    prob_itm_pct: float,
+    dte: int,
+    earnings_date: str = "N/A"
+) -> float:
+    """
+    Calculate Composite Covered Call Score (0 - 100).
+    Formula:
+      - Yield Score (40%): Normalized Annualized Max ROI
+      - Cushion / Safety Score (30%): Downside breakeven buffer percentage
+      - Probability Score (30%): Probability of success sweet spot (OTM / Delta)
+      - Earnings Penalty: -15 points if earnings falls before contract expiration
+    """
+    if ann_max_roi_pct is None or cushion_pct is None:
+        return 0.0
+    
+    # 1. Yield component (40 pts max) - 25% Ann ROI yields full 40 pts
+    yield_component = min(40.0, max(0.0, (ann_max_roi_pct / 25.0) * 40.0))
+    
+    # 2. Cushion / Downside buffer component (30 pts max) - 6% buffer yields full 30 pts
+    cushion_component = min(30.0, max(0.0, (cushion_pct / 6.0) * 30.0))
+    
+    # 3. Probability of Success component (30 pts max)
+    if prob_itm_pct is not None:
+        if 15.0 <= prob_itm_pct <= 40.0:
+            prob_component = 30.0
+        elif prob_itm_pct < 15.0:
+            prob_component = max(10.0, 30.0 - (15.0 - prob_itm_pct) * 1.5)
+        else:
+            prob_component = max(10.0, 30.0 - (prob_itm_pct - 40.0) * 0.8)
+    else:
+        prob_component = 20.0
+        
+    score = yield_component + cushion_component + prob_component
+    
+    # 4. Earnings risk penalty (-15 pts)
+    if earnings_date and earnings_date != "N/A":
+        try:
+            today = date.today()
+            e_dt = datetime.strptime(earnings_date, "%Y-%m-%d").date()
+            days_to_earnings = (e_dt - today).days
+            if 0 <= days_to_earnings <= dte:
+                score -= 15.0
+        except Exception:
+            pass
+            
+    return round(max(0.0, min(100.0, score)), 1)
+
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_ticker_data_cached(input_query: str):
     """Fetch ticker info with 15-minute in-memory caching and background throttling."""
@@ -72,8 +122,10 @@ def fetch_ticker_data_cached(input_query: str):
         try:
             api_monitor.apply_throttle()
             info = ticker.fast_info
-            current_price = info.get('lastPrice') or info.get('previousClose')
-            if current_price and not pd.isna(current_price):
+            # Prioritize official regular market closing price as option chains reflect settlement at 4:00 PM ET
+            close_px = info.get('previousClose') or info.get('regularMarketPreviousClose') or info.get('lastPrice')
+            if close_px and not pd.isna(close_px) and float(close_px) > 0:
+                current_price = float(close_px)
                 break
         except Exception:
             pass
@@ -216,8 +268,10 @@ def screen_covered_calls(input_query: str, custom_purchase_price: float = None):
             ann_max_roi = max_roi * (365.0 / dte)
             
             breakeven = ref_price - premium
+            cushion_pct = round((premium / ref_price) * 100.0, 2)
             
             prob_itm_pct, prob_touch_pct = calculate_option_probabilities(ref_price, strike, iv_pct, dte)
+            score = calculate_covered_call_score(ann_max_roi, cushion_pct, prob_itm_pct, dte, earnings_date)
 
             results.append({
                 'term': f"{term_label} (~{dte}d)",
@@ -236,7 +290,9 @@ def screen_covered_calls(input_query: str, custom_purchase_price: float = None):
                 'ann_premium_roi_pct': round(ann_premium_roi, 2),
                 'max_roi_pct': round(max_roi, 2),
                 'ann_max_roi_pct': round(ann_max_roi, 2),
-                'breakeven_price': round(breakeven, 2)
+                'breakeven_price': round(breakeven, 2),
+                'cushion_pct': cushion_pct,
+                'score': score
             })
 
     return symbol, current_price, ref_price, earnings_date, results

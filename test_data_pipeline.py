@@ -6,6 +6,7 @@ and saves sample benchmark datasets to CSV/JSON and the database for data testin
 """
 
 import os
+import sys
 import json
 import time
 import pandas as pd
@@ -13,14 +14,74 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple
 import yfinance as yf
 
-from screener import screen_covered_calls, calculate_option_probabilities, resolve_to_symbol
-from database import init_db, save_screen_results, load_history, get_db_status
+# Ensure UTF-8 output encoding on Windows consoles
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+from screener import screen_covered_calls, calculate_option_probabilities, resolve_to_symbol, calculate_covered_call_score
+from database import init_db, save_screen_results, load_history, get_db_status, save_weekly_top_picks, get_latest_weekly_top_picks, swap_weekly_pick
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CSV_EXPORT_PATH = os.path.join(DATA_DIR, "sample_options_dataset.csv")
 JSON_EXPORT_PATH = os.path.join(DATA_DIR, "sample_options_dataset.json")
 
 BENCHMARK_TICKERS = ["AAPL", "MSFT", "NVDA", "TSLA", "SPY"]
+
+def test_covered_call_scoring() -> bool:
+    """Verify quantitative composite covered call score calculation and boundaries."""
+    print("Testing Covered Call Quality Scoring engine...")
+    
+    # Test high quality contract
+    score_high = calculate_covered_call_score(ann_max_roi_pct=25.0, cushion_pct=5.0, prob_itm_pct=25.0, dte=60, earnings_date="2099-01-01")
+    assert 80.0 <= score_high <= 100.0, f"High quality contract should score >= 80, got {score_high}"
+    
+    # Test earnings penalty
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    score_with_earnings = calculate_covered_call_score(ann_max_roi_pct=25.0, cushion_pct=5.0, prob_itm_pct=25.0, dte=60, earnings_date=today_str)
+    assert score_high - score_with_earnings == 15.0, "Imminent earnings should deduct exactly 15 points"
+    
+    # Test boundary limits [0, 100]
+    score_low = calculate_covered_call_score(ann_max_roi_pct=-10.0, cushion_pct=0.0, prob_itm_pct=90.0, dte=30, earnings_date=today_str)
+    assert 0.0 <= score_low <= 100.0, f"Score ({score_low}) must stay within [0, 100]"
+    
+    print("  [PASS] Covered call scoring engine verified.")
+    return True
+
+def test_weekly_picks_database() -> bool:
+    """Verify weekly top picks persistence, retrieval, and dynamic swap mechanism."""
+    print("Testing weekly top picks persistence and challenger swap...")
+    init_db()
+    
+    mock_5 = [
+        {"ticker": "AAPL", "stock_price": 220.0, "strike_price": 230.0, "expiration_date": "2026-10-16", "dte": 46, "premium": 8.0, "ann_max_roi_pct": 28.0, "cushion_pct": 3.6, "score": 88.0, "breakeven_price": 212.0},
+        {"ticker": "MSFT", "stock_price": 420.0, "strike_price": 440.0, "expiration_date": "2026-10-16", "dte": 46, "premium": 12.0, "ann_max_roi_pct": 24.0, "cushion_pct": 2.9, "score": 82.0, "breakeven_price": 408.0}
+    ]
+    mock_10 = [
+        {"ticker": "NVDA", "stock_price": 120.0, "strike_price": 132.0, "expiration_date": "2026-10-16", "dte": 46, "premium": 6.0, "ann_max_roi_pct": 32.0, "cushion_pct": 5.0, "score": 92.0, "breakeven_price": 114.0}
+    ]
+    
+    batch_id = "test-batch-001"
+    save_weekly_top_picks(batch_id, mock_5, mock_10)
+    
+    loaded = get_latest_weekly_top_picks()
+    assert len(loaded["5% OTM"]) >= 2, "Loaded 5% OTM picks count mismatch"
+    assert len(loaded["10% OTM"]) >= 1, "Loaded 10% OTM picks count mismatch"
+    
+    # Test Challenger Swap
+    challenger = {"ticker": "AMD", "stock_price": 150.0, "strike_price": 157.5, "expiration_date": "2026-10-16", "dte": 46, "premium": 7.0, "ann_max_roi_pct": 35.0, "cushion_pct": 4.6, "score": 95.0, "breakeven_price": 143.0}
+    success = swap_weekly_pick("5% OTM", "MSFT", challenger)
+    assert success, "Challenger swap operation failed"
+    
+    # Clean up test records so they don't pollute UI
+    import sqlite3
+    conn = sqlite3.connect("covered_calls.db")
+    cur = conn.cursor()
+    cur.execute("DELETE FROM weekly_top_picks WHERE batch_id LIKE 'test-%'")
+    conn.commit()
+    conn.close()
+
+    print("  [PASS] Weekly top picks persistence and swap verified.")
+    return True
 
 def test_black_scholes_math() -> bool:
     """Verify quantitative Black-Scholes probability formulas and bounds."""
@@ -136,6 +197,8 @@ def run_all_tests():
     
     test_black_scholes_math()
     test_symbol_resolution()
+    test_covered_call_scoring()
+    test_weekly_picks_database()
     dataset_df = run_benchmark_collection(["AAPL", "MSFT", "NVDA", "SPY"])
     
     print("\n" + "=" * 60)

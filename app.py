@@ -24,8 +24,8 @@ st.set_page_config(
 # Google Site Verification
 st.html(
     """
+    <meta name="google-site-verification" content="aeh8M7yV4lN0RZ1lxcNmrtwQ2b5fXklTWP4Mz2zivaM" />
     <meta name="google-site-verification" content="google2cc9c81477b8b47c" />
-    <meta name="google-site-verification" content="google2cc9c81477b8b47c.html" />
     """
 )
 

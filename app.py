@@ -5,7 +5,11 @@ from datetime import datetime
 import os
 import time
 
-from screener import screen_covered_calls, resolve_to_symbol, calculate_covered_call_score
+from screener import (
+    screen_covered_calls, resolve_to_symbol, calculate_covered_call_score,
+    evaluate_earnings_risk, get_tmc_subsector_for_ticker, fetch_tmc_peer_summary,
+    TMC_TAXONOMY, TMC_ALL_TICKERS
+)
 from database import (
     init_db, save_screen_results, load_history, get_db_status,
     get_latest_snapshot, get_latest_weekly_top_picks, swap_weekly_pick, save_weekly_top_picks,
@@ -15,7 +19,7 @@ from weekly_scanner import run_weekly_scan, TOP_50_SPY
 from api_monitor import api_monitor, is_market_open_now, is_snapshot_fresh
 
 st.set_page_config(
-    page_title="Covered Call Screener & Yield Engine",
+    page_title="Covered Call Screener & TMC Equity Research Engine",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -37,13 +41,39 @@ db_status = get_db_status()
 with st.sidebar:
     st.title("📈 Screener Controls")
     
-    st.markdown("### Stock Selection")
+    st.markdown("### 🏛️ TMC Sector Focus")
+    tmc_sector_options = [
+        "⭐ All Tech / Mega-Caps",
+        "⚡ Semiconductors & AI Hardware",
+        "☁️ Enterprise SaaS & Cloud",
+        "📺 Digital Media & Streaming",
+        "📡 Telecom & Infrastructure",
+        "📊 Benchmark ETFs"
+    ]
     
-    # Quick Pick Pills for Rapid Trade Analysis
-    popular_tickers = ["AAPL", "NVDA", "TSLA", "MSFT", "UBER", "LYFT", "SPY", "AMD"]
+    selected_tmc_sector = st.selectbox(
+        "TMC Sub-Sector Category",
+        options=tmc_sector_options,
+        index=0,
+        help="Technology, Media & Telecommunications (TMC) industry verticals for institutional equity research."
+    )
+    
+    # Map selected sub-sector to quick pick tickers
+    if "Semiconductors" in selected_tmc_sector:
+        popular_tickers = TMC_TAXONOMY["Semiconductors & AI Hardware"]["tickers"][:8]
+    elif "Enterprise SaaS" in selected_tmc_sector:
+        popular_tickers = TMC_TAXONOMY["Enterprise SaaS & Cloud Infrastructure"]["tickers"][:8]
+    elif "Digital Media" in selected_tmc_sector:
+        popular_tickers = TMC_TAXONOMY["Digital Media, Streaming & Ad-Tech"]["tickers"][:8]
+    elif "Telecom" in selected_tmc_sector:
+        popular_tickers = TMC_TAXONOMY["Telecom & Digital Infrastructure"]["tickers"][:8]
+    elif "Benchmark" in selected_tmc_sector:
+        popular_tickers = TMC_TAXONOMY["Tech & Sector Benchmarks"]["tickers"][:6]
+    else:
+        popular_tickers = ["AAPL", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "AMD"]
     
     if "selected_ticker" not in st.session_state:
-        st.session_state["selected_ticker"] = "AAPL"
+        st.session_state["selected_ticker"] = popular_tickers[0]
         
     def on_pill_change():
         if st.session_state.get("quick_pill_select"):
@@ -59,12 +89,12 @@ with st.sidebar:
     )
     
     if "ticker_text_input" not in st.session_state:
-        st.session_state["ticker_text_input"] = st.session_state.get("selected_ticker", "AAPL")
+        st.session_state["ticker_text_input"] = st.session_state.get("selected_ticker", popular_tickers[0])
         
     ticker_input = st.text_input(
         "Ticker Symbol or Company Name",
         key="ticker_text_input",
-        help="Enter any US stock ticker (e.g. AAPL, NVDA, TSLA, UBER, LYFT) or company name."
+        help="Enter any US stock ticker (e.g. NVDA, MSFT, AAPL, TSM, CRM, PLTR) or company name."
     ).strip()
 
     use_custom_cost = st.checkbox("Custom Purchase Price", help="Calculate yields against your personal purchase price instead of current market price.")
@@ -184,41 +214,43 @@ def generate_newsletter_markdown(weekly_data: dict) -> str:
     gen_at = weekly_data.get("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     batch_id = weekly_data.get("batch_id", "N/A")
     lines = [
-        "# 📊 Weekly Top Covered Call Ideas (SPY Top 50)",
-        f"**Generated / Captured**: `{gen_at}` | **Universe**: S&P 500 Top 50 Mega-Caps",
+        "# 📊 Weekly Top Covered Call Ideas (SPY Top 50 & TMC Universe)",
+        f"**Generated / Captured**: `{gen_at}` | **Universe**: S&P 500 Top 50 & TMC Large-Caps",
         "**Settlement Baseline**: Official Regular Market Closing Settlement Prices\n",
         "### 🎯 Top 5 Picks: +5% OTM (High Yield & Downside Cushion)",
-        "| Rank | Ticker | Stock Price | Strike | Exp Date | DTE | Premium | Premium ROI | Ann. Max ROI | Cushion | Prob. ITM | Score |",
-        "| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
+        "| Rank | Ticker | Stock Price | Strike | Exp Date | DTE | Premium | Premium ROI | Ann. Max ROI | Cushion | Earnings Event | Prob. ITM | Score |",
+        "| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
     ]
     for p in weekly_data.get("5% OTM", [])[:5]:
         prem_roi = p.get('premium_roi_pct') or (round((p['premium'] / p['stock_price']) * 100.0, 2) if p.get('stock_price') else 0.0)
-        lines.append(f"| #{p.get('rank', 1)} | **{p['ticker']}** | ${p['stock_price']:.2f} | ${p['strike_price']:.2f} | {p['expiration_date']} | {p['dte']}d | ${p['premium']:.2f} | **{prem_roi:.2f}%** | **{p['ann_max_roi_pct']:.1f}%** | {p.get('cushion_pct', 0.0):.1f}% | {p.get('prob_itm_pct', 'N/A')}% | **{p.get('score', 0.0)}** |")
+        e_badge = p.get('earnings_badge_short') or evaluate_earnings_risk(p.get('earnings_date', 'N/A'), p.get('dte', 60)).get('badge_short', 'ℹ️ No Date')
+        lines.append(f"| #{p.get('rank', 1)} | **{p['ticker']}** | ${p['stock_price']:.2f} | ${p['strike_price']:.2f} | {p['expiration_date']} | {p['dte']}d | ${p['premium']:.2f} | **{prem_roi:.2f}%** | **{p['ann_max_roi_pct']:.1f}%** | {p.get('cushion_pct', 0.0):.1f}% | {e_badge} | {p.get('prob_itm_pct', 'N/A')}% | **{p.get('score', 0.0)}** |")
     
     lines.append("\n### 🚀 Top 5 Picks: +10% OTM (Capital Growth & Low Assignment Risk)")
-    lines.append("| Rank | Ticker | Stock Price | Strike | Exp Date | DTE | Premium | Premium ROI | Ann. Max ROI | Cushion | Prob. ITM | Score |")
+    lines.append("| Rank | Ticker | Stock Price | Strike | Exp Date | DTE | Premium | Premium ROI | Ann. Max ROI | Cushion | Earnings Event | Prob. ITM | Score |")
     lines.append("| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
     for p in weekly_data.get("10% OTM", [])[:5]:
         prem_roi = p.get('premium_roi_pct') or (round((p['premium'] / p['stock_price']) * 100.0, 2) if p.get('stock_price') else 0.0)
-        lines.append(f"| #{p.get('rank', 1)} | **{p['ticker']}** | ${p['stock_price']:.2f} | ${p['strike_price']:.2f} | {p['expiration_date']} | {p['dte']}d | ${p['premium']:.2f} | **{prem_roi:.2f}%** | **{p['ann_max_roi_pct']:.1f}%** | {p.get('cushion_pct', 0.0):.1f}% | {p.get('prob_itm_pct', 'N/A')}% | **{p.get('score', 0.0)}** |")
+        e_badge = p.get('earnings_badge_short') or evaluate_earnings_risk(p.get('earnings_date', 'N/A'), p.get('dte', 60)).get('badge_short', 'ℹ️ No Date')
+        lines.append(f"| #{p.get('rank', 1)} | **{p['ticker']}** | ${p['stock_price']:.2f} | ${p['strike_price']:.2f} | {p['expiration_date']} | {p['dte']}d | ${p['premium']:.2f} | **{prem_roi:.2f}%** | **{p['ann_max_roi_pct']:.1f}%** | {p.get('cushion_pct', 0.0):.1f}% | {e_badge} | {p.get('prob_itm_pct', 'N/A')}% | **{p.get('score', 0.0)}** |")
         
     lines.append("\n---\n*Disclaimer: Options trading involves substantial risk. Quantitative scores reflect mathematical models based on Black-Scholes and are not investment recommendations.*")
     return "\n".join(lines)
 
 # ----------------- MAIN DASHBOARD TABS -----------------
-st.title("📈 Covered Call Screener & Yield Engine")
-st.markdown("Quantitative Covered Call screening across the S&P 500, Black-Scholes probability modeling, and weekly idea publisher.")
+st.title("📈 Covered Call Screener & TMC Equity Research Engine")
+st.markdown("Institutional Covered Call screening across TMC (Technology, Media & Telecom) and S&P 500 constituents, Black-Scholes risk modeling, and earnings event catalyst tracking.")
 
 tab_weekly, tab_live, tab_methodology = st.tabs([
     "⭐ Weekly Top Ideas (+5% & +10% OTM)",
-    "🎯 On-Demand Screener & Yield Matrix",
-    "📐 Quantitative Methodology & Formulas"
+    "🎯 On-Demand Screener & TMC Matrix",
+    "📐 Quantitative Methodology & TMC Framework"
 ])
 
 # ----------------- TAB 1: WEEKLY TOP IDEAS -----------------
 with tab_weekly:
-    st.subheader("⭐ Weekly Best Covered Call Ideas (SPY Top 50 Universe)")
-    st.caption("Screened after-market hours from the top 50 S&P 500 constituents. Evaluated for maximum risk-adjusted ROI, downside cushion, and non-duplicative quality.")
+    st.subheader("⭐ Weekly Best Covered Call Ideas (SPY & TMC Universe)")
+    st.caption("Screened after-market hours from top constituents. Evaluated for maximum risk-adjusted ROI, downside cushion, earnings event safety, and non-duplicative quality.")
 
     # Load latest weekly ideas from Database
     weekly_data = get_latest_weekly_top_picks()
@@ -229,7 +261,7 @@ with tab_weekly:
 
     # Header Status Banner
     if gen_time:
-        st.info(f"🕒 **Weekly Batch Generated**: `{gen_time}` | 📦 **Batch ID**: `{batch_id}` | 🏛️ **Universe**: Top 50 SPY Constituents | 🔒 **Price Basis**: Official Regular Market Close")
+        st.info(f"🕒 **Weekly Batch Generated**: `{gen_time}` | 📦 **Batch ID**: `{batch_id}` | 🏛️ **Universe**: Top 50 SPY & TMC Leaders | 🔒 **Price Basis**: Official Regular Market Close")
     else:
         st.warning("⚠️ No weekly batch scan records found yet. Click below to run an initial scan across the universe.")
 
@@ -242,7 +274,7 @@ with tab_weekly:
             Spreads requests with gentle pacing to ensure full API compliance.
             """)
         with col_scan2:
-            scan_mode = st.selectbox("Scan Scope", ["Fast Test Basket (10 Tickers)", "Full Universe (Top 50 SPY)"])
+            scan_mode = st.selectbox("Scan Scope", ["Fast Test Basket (10 Tickers)", "Full Universe (Top 50 SPY & TMC)"])
         with col_scan3:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("🚀 Run Batch Scan Now", type="primary"):
@@ -357,9 +389,16 @@ with tab_weekly:
         if 'premium_roi_pct' not in df_picks.columns and 'premium' in df_picks.columns and 'stock_price' in df_picks.columns:
             df_picks['premium_roi_pct'] = ((df_picks['premium'] / df_picks['stock_price']) * 100.0).round(2)
         
+        # Calculate earnings_badge_short if missing
+        if 'earnings_badge_short' not in df_picks.columns:
+            df_picks['earnings_badge_short'] = df_picks.apply(
+                lambda r: evaluate_earnings_risk(str(r.get('earnings_date', 'N/A')), int(r.get('dte', 60))).get('badge_short', 'ℹ️ No Date'),
+                axis=1
+            )
+        
         cols = [
             'rank', 'ticker', 'stock_price', 'strike_price', 'term', 'expiration_date',
-            'premium', 'premium_roi_pct', 'ann_max_roi_pct', 'cushion_pct', 'delta', 'prob_itm_pct', 'score', 'generated_at'
+            'premium', 'premium_roi_pct', 'ann_max_roi_pct', 'cushion_pct', 'earnings_badge_short', 'delta', 'prob_itm_pct', 'score', 'generated_at'
         ]
         available_cols = [c for c in cols if c in df_picks.columns]
         table_df = df_picks[available_cols].copy()
@@ -375,6 +414,7 @@ with tab_weekly:
             'premium_roi_pct': 'Premium ROI (%)',
             'ann_max_roi_pct': 'Ann. Max ROI (%)',
             'cushion_pct': 'Cushion (%)',
+            'earnings_badge_short': 'Earnings Catalyst',
             'delta': 'Delta',
             'prob_itm_pct': 'Prob. ITM (%)',
             'score': 'Score (0-100)',
@@ -459,10 +499,14 @@ with tab_live:
         else:
             st.success(f"🕒 **Data Sourced**: `{snap_time}` | 🟢 **Live Market Quote**: Fresh market options captured (Saved as Snapshot #{snapshot_id}).")
 
+        # Sub-Sector Resolution
+        subsector_name = get_tmc_subsector_for_ticker(symbol)
+
         # Key KPI Metrics Cards
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
         with kpi1:
             st.metric("Stock Symbol", symbol)
+            st.caption(f"🏛️ **{subsector_name}**")
         with kpi2:
             price_label = "Live Market Price" if is_market_open_now() else "Closing Market Price"
             st.metric(price_label, f"${curr_price:.2f}")
@@ -470,6 +514,26 @@ with tab_live:
             st.metric("Reference Cost Basis", f"${ref_price:.2f}", help="Cost basis used for yield and ROI calculations")
         with kpi4:
             st.metric("Next Earnings Date", earnings_date)
+            e_risk_meta = evaluate_earnings_risk(earnings_date, dte=60)
+            if e_risk_meta["inside_expiry"]:
+                st.caption(f"🔥 **Inside ~60d Expiry** ({e_risk_meta['days_to_earnings']}d away)")
+            elif e_risk_meta["has_earnings"]:
+                st.caption(f"✅ **Safe Window** ({e_risk_meta['days_to_earnings']}d away)")
+            else:
+                st.caption("ℹ️ Unconfirmed Date")
+
+        # Visual Earnings Risk Warning Card
+        e_risk_eval = evaluate_earnings_risk(earnings_date, dte=60)
+        if e_risk_eval["inside_expiry"]:
+            with st.container(border=True):
+                st.markdown(f"""
+                ### 🔥 Earnings Event Catalyst Alert (`{symbol}`)
+                **Binary Event Warning**: Next quarterly earnings announcement is scheduled on **`{earnings_date}`** (**{e_risk_eval['days_to_earnings']} days away**).
+                * **Option Impact**: Contract duration spans across the earnings release. Option premiums are inflated due to binary event volatility.
+                * **Risk Strategy**: Writing covered calls across earnings collects elevated yield but carries downside gap risk if earnings miss expectations. Composite Score has applied the **-15 pt binary event penalty**.
+                """)
+        elif e_risk_eval["has_earnings"] and e_risk_eval["days_to_earnings"] is not None and e_risk_eval["days_to_earnings"] > 0:
+            st.success(f"✅ **Post-Earnings Safe Window**: Next earnings report is on `{earnings_date}` ({e_risk_eval['days_to_earnings']} days away), which is comfortably after the front-month contract expiration.")
 
         st.markdown("---")
         st.subheader(f"Option Chains & Yield Matrix for {symbol}")
@@ -477,9 +541,16 @@ with tab_live:
         if results:
             df = pd.DataFrame(results)
             
+            # Ensure earnings_badge_short is present
+            if 'earnings_badge_short' not in df.columns:
+                df['earnings_badge_short'] = df.apply(
+                    lambda r: evaluate_earnings_risk(str(earnings_date), int(r.get('dte', 60))).get('badge_short', 'ℹ️ No Date'),
+                    axis=1
+                )
+            
             cols_to_include = [
                 'term', 'expiration_date', 'target_type', 'strike_price', 'premium', 'premium_roi_pct',
-                'ann_max_roi_pct', 'cushion_pct', 'implied_volatility_pct', 'delta', 'prob_itm_pct', 'prob_touch_pct',
+                'ann_max_roi_pct', 'cushion_pct', 'earnings_badge_short', 'implied_volatility_pct', 'delta', 'prob_itm_pct', 'prob_touch_pct',
                 'ann_premium_roi_pct', 'max_roi_pct', 'score', 'breakeven_price'
             ]
             existing_cols = [c for c in cols_to_include if c in df.columns]
@@ -494,6 +565,7 @@ with tab_live:
                 'premium_roi_pct': 'Premium ROI (%)',
                 'ann_max_roi_pct': 'Ann. Max ROI (%)',
                 'cushion_pct': 'Cushion (%)',
+                'earnings_badge_short': 'Earnings Catalyst',
                 'implied_volatility_pct': 'IV (%)',
                 'delta': 'Delta',
                 'prob_itm_pct': 'Prob. ITM (%)',
@@ -576,6 +648,36 @@ with tab_live:
 
             st.plotly_chart(fig)
 
+            # TMC Sector Peer Comparison Matrix
+            st.markdown("---")
+            st.subheader(f"⚡ TMC Peer Comparison Matrix: {subsector_name}")
+            st.caption(f"Side-by-side valuation, 52-week range, and earnings catalyst tracking for {subsector_name} constituents.")
+            
+            peer_candidates = []
+            if subsector_name in TMC_TAXONOMY:
+                peer_candidates = [t for t in TMC_TAXONOMY[subsector_name]["tickers"] if t.upper() != symbol.upper()][:5]
+            if not peer_candidates:
+                peer_candidates = ["AAPL", "MSFT", "GOOGL", "META", "NVDA"]
+                
+            peers_list = [symbol] + peer_candidates
+            
+            with st.spinner(f"Loading {subsector_name} peer metrics..."):
+                peers_data = fetch_tmc_peer_summary(peers_list)
+                if peers_data:
+                    df_peers = pd.DataFrame(peers_data)
+                    rename_peers = {
+                        "ticker": "Ticker",
+                        "subsector": "Sub-Sector",
+                        "price": "Price ($)",
+                        "range_52w": "52-Week Range",
+                        "market_cap": "Market Cap",
+                        "earnings_date": "Next Earnings",
+                        "earnings_badge": "Earnings Catalyst"
+                    }
+                    avail_peer_cols = [c for c in rename_peers.keys() if c in df_peers.columns]
+                    df_peers_disp = df_peers[avail_peer_cols].rename(columns=rename_dict | rename_peers)
+                    st.dataframe(df_peers_disp, width="stretch", hide_index=True)
+
         else:
             st.warning(f"No suitable options found matching criteria for {symbol}.")
 
@@ -595,7 +697,7 @@ with tab_live:
 
 # ----------------- TAB 3: QUANTITATIVE METHODOLOGY -----------------
 with tab_methodology:
-    st.subheader("📐 Quantitative Formulas & Mathematical Modeling")
+    st.subheader("📐 Quantitative Formulas & Institutional TMC Valuation Framework")
     
     st.markdown(r"""
     ### 1. Composite Covered Call Quality Score (0–100)
@@ -605,18 +707,35 @@ with tab_methodology:
     - **Yield Score (40 pts)**: Rewards high Annualized Max ROI ($\min(40, \frac{\text{Ann Max ROI}}{25\%} \times 40)$).
     - **Downside Cushion Score (30 pts)**: Rewards downside buffer ($\min(30, \frac{\text{Cushion \%}}{6\%} \times 30)$).
     - **Probability Sweet Spot (30 pts)**: Scored on Black-Scholes $P(\text{ITM})$ targeting ideal range ($15\% - 35\%$).
-    - **Earnings Penalty (-15 pts)**: Deducted if earnings announcement falls within option lifespan ($\le \text{DTE}$).
+    - **Earnings Penalty (-15 pts)**: Deducted if quarterly earnings announcement falls within option lifespan ($\le \text{DTE}$).
 
     ---
 
-    ### 2. Black-Scholes Call Delta ($\Delta = N(d_1)$)
+    ### 2. Binary Earnings Catalyst & Volatility Crush Dynamics
+    Quarterly earnings reports represent binary price events that dramatically alter the risk profile of covered call writing:
+    - **Pre-Earnings Implied Volatility Expansion**: Option premiums expand leading into earnings due to uncertainty.
+    - **Post-Earnings IV Crush**: Immediately following earnings, Implied Volatility collapses by **30% to 60%**.
+    - **Institutional Rule**: If an option contract duration spans across earnings ($0 \le \text{Days to Earnings} \le \text{DTE}$), the application flags `🔥 EARNINGS INSIDE EXPIRY` and applies a **-15 point risk penalty**. Contracts expiring prior to earnings receive the `✅ Safe Window` classification.
+
+    ---
+
+    ### 3. TMC Sector Dynamics for Buy-Side Equity Research
+    The platform incorporates Technology, Media, and Telecommunications (TMC) sub-industry taxonomy:
+    - **⚡ Semiconductors & AI Hardware** (*NVDA, TSM, AMD, AVGO*): High capital intensity, cyclical demand, higher Implied Volatility. Demands wider downside cushions ($\ge 5\%$).
+    - **☁️ Enterprise SaaS & Cloud Infrastructure** (*MSFT, CRM, NOW, ADBE*): Recurring ARR business models, sticky retention, lower beta. Ideal for steady annualized premium generation ($12\% - 20\%$).
+    - **📺 Digital Media & Ad-Tech** (*GOOGL, META, NFLX, SPOT*): Macro ad-spending sensitivity, high cash conversion.
+    - **📡 Telecom & Digital Infrastructure** (*T, VZ, TMUS, AMT, EQIX*): High asset backing, utility-like dividend yields, lower option IV.
+
+    ---
+
+    ### 4. Black-Scholes Call Delta ($\Delta = N(d_1)$)
     The Black-Scholes Delta measures the rate of change of option value per \$1 move in the underlying stock price:
     $$d_1 = \frac{\ln(S / K) + (r + \frac{1}{2}\sigma^2)T}{\sigma \sqrt{T}}$$
     $$\Delta_{\text{call}} = N(d_1) = \frac{1}{2} \left[ 1 + \text{erf}\left(\frac{d_1}{\sqrt{2}}\right) \right]$$
 
     ---
 
-    ### 3. Black-Scholes In-The-Money Probability ($N(d_2)$)
+    ### 5. Black-Scholes In-The-Money Probability ($N(d_2)$)
     The probability that an Out-of-the-Money call option expires In-The-Money (ITM) under risk-neutral Black-Scholes dynamics is given by $N(d_2)$:
     $$d_2 = d_1 - \sigma \sqrt{T} = \frac{\ln(S / K) + (r - \frac{1}{2}\sigma^2)T}{\sigma \sqrt{T}}$$
     $$\text{Prob. ITM} = N(d_2) = \frac{1}{2} \left[ 1 + \text{erf}\left(\frac{d_2}{\sqrt{2}}\right) \right]$$
@@ -629,13 +748,13 @@ with tab_methodology:
 
     ---
 
-    ### 4. Probability of Touching / Hitting Strike Price
+    ### 6. Probability of Touching / Hitting Strike Price
     By the **Reflection Principle** of Brownian motion with drift, the probability that the underlying stock price touches or exceeds the strike price $K$ at *any point* prior to expiration is approximately:
     $$\text{Prob. Hit Strike} \approx \min\left(100\%, 2 \times N(d_2)\right)$$
 
     ---
 
-    ### 5. Covered Call Yield & ROI Metrics
+    ### 7. Covered Call Yield & ROI Metrics
     - **Premium Yield (%)**: $\frac{\text{Option Premium}}{\text{Reference Price}} \times 100$
     - **Annualized Premium Yield (%)**: $\text{Premium Yield} \times \frac{365}{\text{DTE}}$
     - **Max ROI (%)**: $\frac{(K - \text{Reference Price}) + \text{Option Premium}}{\text{Reference Price}} \times 100$

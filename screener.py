@@ -45,6 +45,42 @@ def calculate_option_probabilities(S: float, K: float, iv_pct: float, dte: int, 
     _, prob_itm, prob_touch = calculate_option_greeks_and_probabilities(S, K, iv_pct, dte, r)
     return prob_itm, prob_touch
 
+# TMC (Technology, Media & Telecommunications) Sub-Sector Taxonomy for Institutional Research
+TMC_TAXONOMY = {
+    "Semiconductors & AI Hardware": {
+        "description": "GPU/CPU designers, foundries, fabless semi, memory, and semiconductor equipment",
+        "tickers": ["NVDA", "TSM", "AMD", "AVGO", "QCOM", "ARM", "INTC", "MU", "AMAT", "ASML", "LRCX", "MRVL"]
+    },
+    "Enterprise SaaS & Cloud Infrastructure": {
+        "description": "Hyperscalers, cloud infrastructure, enterprise B2B SaaS, data platforms, and cybersecurity",
+        "tickers": ["MSFT", "CRM", "NOW", "ADBE", "ORCL", "PLTR", "SNOW", "PANW", "CRWD", "WDAY", "DDOG", "NET"]
+    },
+    "Digital Media, Streaming & Ad-Tech": {
+        "description": "Digital ad-tech ecosystems, connected TV, global streaming networks, and consumer internet platforms",
+        "tickers": ["GOOGL", "META", "NFLX", "SPOT", "DIS", "TTD", "PINS", "SNAP", "ROKU", "UBER"]
+    },
+    "Telecom & Digital Infrastructure": {
+        "description": "5G wireless carriers, cellular tower REITs, hyper-scale data centers, and enterprise networking",
+        "tickers": ["T", "VZ", "TMUS", "AMT", "CCI", "EQIX", "DLR", "CSCO", "ANET"]
+    },
+    "Tech & Sector Benchmarks": {
+        "description": "Benchmark ETFs for Nasdaq-100, Tech, Software, Semiconductors, and Broad S&P 500",
+        "tickers": ["QQQ", "XLK", "SOXX", "SMH", "IGV", "SPY"]
+    }
+}
+
+TMC_ALL_TICKERS = sorted(list(set(
+    ticker for group in TMC_TAXONOMY.values() for ticker in group["tickers"]
+)))
+
+def get_tmc_subsector_for_ticker(ticker: str) -> str:
+    """Return TMC sub-sector name for a given ticker symbol."""
+    upper = ticker.upper()
+    for sector_name, data in TMC_TAXONOMY.items():
+        if upper in data["tickers"]:
+            return sector_name
+    return "General Tech / S&P 500"
+
 import re
 
 POPULAR_SYMBOLS_MAP = {
@@ -77,6 +113,8 @@ POPULAR_SYMBOLS_MAP = {
     'ADVANCED MICRO DEVICES': 'AMD',
     'SPY': 'SPY',
     'S&P 500': 'SPY',
+    'QQQ': 'QQQ',
+    'NASDAQ': 'QQQ',
     'PLTR': 'PLTR',
     'PALANTIR': 'PLTR',
     'NETFLIX': 'NFLX',
@@ -91,6 +129,75 @@ POPULAR_SYMBOLS_MAP = {
     'BERKSHIRE': 'BRK-B',
     'BROADCOM': 'AVGO',
     'AVGO': 'AVGO',
+    'TAIWAN SEMI': 'TSM',
+    'TSM': 'TSM',
+    'SALESFORCE': 'CRM',
+    'CRM': 'CRM',
+    'SERVICENOW': 'NOW',
+    'NOW': 'NOW',
+    'ADOBE': 'ADBE',
+    'ADBE': 'ADBE',
+    'ORACLE': 'ORCL',
+    'ORCL': 'ORCL',
+    'SNOWFLAKE': 'SNOW',
+    'SNOW': 'SNOW',
+    'SPOTIFY': 'SPOT',
+    'SPOT': 'SPOT',
+    'TRADE DESK': 'TTD',
+    'TTD': 'TTD',
+    'PALO ALTO': 'PANW',
+    'PANW': 'PANW',
+    'CROWDSTRIKE': 'CRWD',
+    'CRWD': 'CRWD',
+    'T-MOBILE': 'TMUS',
+    'TMUS': 'TMUS',
+    'VERIZON': 'VZ',
+    'VZ': 'VZ',
+    'AT&T': 'T',
+    'T': 'T',
+    'AMERICAN TOWER': 'AMT',
+    'AMT': 'AMT',
+    'EQUINIX': 'EQIX',
+    'EQIX': 'EQIX',
+    'CISCO': 'CSCO',
+    'CSCO': 'CSCO',
+    'ARISTA': 'ANET',
+    'ANET': 'ANET',
+    'QUALCOMM': 'QCOM',
+    'QCOM': 'QCOM',
+    'ARM': 'ARM',
+    'ARM HOLDINGS': 'ARM',
+    'INTEL': 'INTC',
+    'INTC': 'INTC',
+    'MICRON': 'MU',
+    'MU': 'MU',
+    'APPLIED MATERIALS': 'AMAT',
+    'AMAT': 'AMAT',
+    'ASML': 'ASML',
+    'ASML HOLDING': 'ASML',
+    'LAM RESEARCH': 'LRCX',
+    'LRCX': 'LRCX',
+    'MARVELL': 'MRVL',
+    'MRVL': 'MRVL',
+    'WORKDAY': 'WDAY',
+    'WDAY': 'WDAY',
+    'DATADOG': 'DDOG',
+    'DDOG': 'DDOG',
+    'CLOUDFLARE': 'NET',
+    'NET': 'NET',
+    'PINTEREST': 'PINS',
+    'PINS': 'PINS',
+    'SNAP': 'SNAP',
+    'SNAP INC': 'SNAP',
+    'ROKU': 'ROKU',
+    'CROWN CASTLE': 'CCI',
+    'CCI': 'CCI',
+    'DIGITAL REALTY': 'DLR',
+    'DLR': 'DLR',
+    'XLK': 'XLK',
+    'SOXX': 'SOXX',
+    'SMH': 'SMH',
+    'IGV': 'IGV',
     'ELI LILLY': 'LLY',
     'LLY': 'LLY',
     'COSTCO': 'COST',
@@ -98,7 +205,7 @@ POPULAR_SYMBOLS_MAP = {
 }
 
 def resolve_to_symbol(query: str) -> str:
-    """Convert company names (e.g., 'uber', 'apple') to ticker symbols ('UBER', 'AAPL')."""
+    """Convert company names (e.g., 'uber', 'apple', 'taiwan semi') to ticker symbols ('UBER', 'AAPL', 'TSM')."""
     cleaned = query.strip()
     if not cleaned:
         return cleaned
@@ -128,6 +235,68 @@ def resolve_to_symbol(query: str) -> str:
         pass
         
     return upper_clean
+
+def evaluate_earnings_risk(earnings_date: str, dte: int) -> Dict[str, Any]:
+    """
+    Evaluate binary earnings event risk for an option contract.
+    Returns structured risk metadata, badge string, days-to-earnings, and analyst notes.
+    """
+    if not earnings_date or earnings_date == "N/A":
+        return {
+            "has_earnings": False,
+            "inside_expiry": False,
+            "days_to_earnings": None,
+            "badge": "ℹ️ No Confirmed Earnings",
+            "badge_short": "ℹ️ No Date",
+            "severity": "info",
+            "detail": "No confirmed quarterly earnings date reported for this expiration period."
+        }
+    
+    try:
+        today = date.today()
+        e_dt = datetime.strptime(earnings_date, "%Y-%m-%d").date()
+        days = (e_dt - today).days
+        
+        if 0 <= days <= dte:
+            return {
+                "has_earnings": True,
+                "inside_expiry": True,
+                "days_to_earnings": days,
+                "badge": f"🔥 EARNINGS INSIDE ({days}d)",
+                "badge_short": f"🔥 Inside ({days}d)",
+                "severity": "warning",
+                "detail": f"Binary event: Earnings announcement is in {days} days, prior to option expiration ({dte}d DTE). Premium includes volatility event risk."
+            }
+        elif days > dte:
+            return {
+                "has_earnings": True,
+                "inside_expiry": False,
+                "days_to_earnings": days,
+                "badge": f"✅ Post-Earnings Safe ({days}d)",
+                "badge_short": f"✅ Safe ({days}d)",
+                "severity": "success",
+                "detail": f"Safe window: Option contract expires in {dte}d before earnings report in {days} days."
+            }
+        else:
+            return {
+                "has_earnings": False,
+                "inside_expiry": False,
+                "days_to_earnings": days,
+                "badge": "✅ Past Earnings Safe",
+                "badge_short": "✅ Past Safe",
+                "severity": "success",
+                "detail": f"Earnings report was {abs(days)} days ago. Trading in normal post-earnings volatility regime."
+            }
+    except Exception:
+        return {
+            "has_earnings": False,
+            "inside_expiry": False,
+            "days_to_earnings": None,
+            "badge": "ℹ️ Unconfirmed Date",
+            "badge_short": "ℹ️ Unconfirmed",
+            "severity": "info",
+            "detail": "Could not parse earnings date format."
+        }
 
 def calculate_covered_call_score(
     ann_max_roi_pct: float,
@@ -166,16 +335,10 @@ def calculate_covered_call_score(
         
     score = yield_component + cushion_component + prob_component
     
-    # 4. Earnings risk penalty (-15 pts)
-    if earnings_date and earnings_date != "N/A":
-        try:
-            today = date.today()
-            e_dt = datetime.strptime(earnings_date, "%Y-%m-%d").date()
-            days_to_earnings = (e_dt - today).days
-            if 0 <= days_to_earnings <= dte:
-                score -= 15.0
-        except Exception:
-            pass
+    # 4. Earnings risk penalty (-15 pts if binary event falls inside contract lifespan)
+    earnings_risk = evaluate_earnings_risk(earnings_date, dte)
+    if earnings_risk.get("inside_expiry"):
+        score -= 15.0
             
     return round(max(0.0, min(100.0, score)), 1)
 
@@ -359,6 +522,7 @@ def screen_covered_calls(input_query: str, custom_purchase_price: float = None):
             delta_calc, prob_itm_pct, prob_touch_pct = calculate_option_greeks_and_probabilities(ref_price, strike, iv_pct, dte)
             delta_val = delta_calc if delta_calc is not None else (round(float(delta_raw), 3) if (delta_raw is not None and not pd.isna(delta_raw)) else None)
             score = calculate_covered_call_score(ann_max_roi, cushion_pct, prob_itm_pct, dte, earnings_date)
+            earnings_risk = evaluate_earnings_risk(earnings_date, dte)
 
             results.append({
                 'term': f"{term_label} (~{dte}d)",
@@ -379,7 +543,56 @@ def screen_covered_calls(input_query: str, custom_purchase_price: float = None):
                 'ann_max_roi_pct': round(ann_max_roi, 2),
                 'breakeven_price': round(breakeven, 2),
                 'cushion_pct': cushion_pct,
-                'score': score
+                'score': score,
+                'earnings_inside_expiry': earnings_risk['inside_expiry'],
+                'days_to_earnings': earnings_risk['days_to_earnings'],
+                'earnings_badge': earnings_risk['badge'],
+                'earnings_badge_short': earnings_risk['badge_short'],
+                'earnings_risk_detail': earnings_risk['detail']
             })
 
     return symbol, current_price, ref_price, earnings_date, results
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_tmc_peer_summary(tickers: List[str]) -> List[Dict[str, Any]]:
+    """
+    Fetch fundamental snapshot, performance, volatility, and earnings status
+    for a list of TMC peer companies.
+    """
+    summary_list = []
+    for t in tickers:
+        try:
+            sym = resolve_to_symbol(t)
+            ticker_obj = yf.Ticker(sym)
+            api_monitor.apply_throttle()
+            
+            info = ticker_obj.fast_info
+            px = info.get('lastPrice') or info.get('regularMarketPrice') or info.get('previousClose')
+            if not px or pd.isna(px):
+                continue
+            curr_px = round(float(px), 2)
+            
+            hi_52 = info.get('yearHigh')
+            lo_52 = info.get('yearLow')
+            mkt_cap = info.get('marketCap')
+            
+            range_str = f"${float(lo_52):.2f} - ${float(hi_52):.2f}" if (hi_52 and lo_52) else "N/A"
+            mkt_cap_str = f"${float(mkt_cap)/1e9:.1f}B" if (mkt_cap and mkt_cap > 0) else "N/A"
+            
+            e_date = get_earnings_date(ticker_obj)
+            e_risk = evaluate_earnings_risk(e_date, dte=60)
+            subsector = get_tmc_subsector_for_ticker(sym)
+            
+            summary_list.append({
+                "ticker": sym,
+                "subsector": subsector,
+                "price": curr_px,
+                "range_52w": range_str,
+                "market_cap": mkt_cap_str,
+                "earnings_date": e_date,
+                "earnings_badge": e_risk["badge_short"],
+                "earnings_inside_60d": e_risk["inside_expiry"]
+            })
+        except Exception:
+            continue
+    return summary_list

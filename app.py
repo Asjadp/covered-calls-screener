@@ -8,6 +8,7 @@ import time
 from screener import (
     screen_covered_calls, resolve_to_symbol, calculate_covered_call_score,
     evaluate_earnings_risk, get_tmc_subsector_for_ticker, fetch_tmc_peer_summary,
+    fetch_fundamental_metrics, calculate_earnings_implied_move, generate_pitch_tear_sheet,
     TMC_TAXONOMY, TMC_ALL_TICKERS
 )
 from database import (
@@ -535,6 +536,77 @@ with tab_live:
         elif e_risk_eval["has_earnings"] and e_risk_eval["days_to_earnings"] is not None and e_risk_eval["days_to_earnings"] > 0:
             st.success(f"✅ **Post-Earnings Safe Window**: Next earnings report is on `{earnings_date}` ({e_risk_eval['days_to_earnings']} days away), which is comfortably after the front-month contract expiration.")
 
+        # Fetch Institutional Fundamental Valuation & Analyst Consensus
+        with st.spinner(f"Loading fundamental valuation & consensus targets for {symbol}..."):
+            try:
+                fundamentals = fetch_fundamental_metrics(symbol)
+            except Exception:
+                fundamentals = {"symbol": symbol}
+
+        # ----------------- SECTION A: FUNDAMENTAL VALUATION & SAAS SCORECARD -----------------
+        st.markdown("---")
+        st.subheader(f"🏛️ Fundamental Valuation & SaaS Efficiency Scorecard ({symbol})")
+        st.caption(f"Institutional multiples, Rule of 40 scorecard, and cash flow conversion for **{fundamentals.get('company_name', symbol)}**.")
+        
+        with st.container(border=True):
+            fcol1, fcol2, fcol3, fcol4 = st.columns(4)
+            with fcol1:
+                fwd_pe_disp = f"{fundamentals.get('forward_pe'):.1f}x" if fundamentals.get('forward_pe') else "N/A"
+                trail_pe_disp = f"{fundamentals.get('trailing_pe'):.1f}x" if fundamentals.get('trailing_pe') else "N/A"
+                st.metric("Forward P/E Multiple", fwd_pe_disp, help="Consensus Forward Price-to-Earnings multiple")
+                st.caption(f"Trailing P/E: **{trail_pe_disp}**")
+            with fcol2:
+                ev_ebitda_disp = f"{fundamentals.get('ev_ebitda'):.1f}x" if fundamentals.get('ev_ebitda') else "N/A"
+                ev_sales_disp = f"{fundamentals.get('ev_sales'):.1f}x" if fundamentals.get('ev_sales') else "N/A"
+                st.metric("EV / NTM EBITDA", ev_ebitda_disp, help="Enterprise Value to NTM EBITDA multiple")
+                st.caption(f"EV / Sales: **{ev_sales_disp}**")
+            with fcol3:
+                rev_growth_disp = f"{fundamentals.get('revenue_growth_pct'):+.1f}%" if fundamentals.get('revenue_growth_pct') is not None else "N/A"
+                gross_margin_disp = f"{fundamentals.get('gross_margin_pct'):.1f}%" if fundamentals.get('gross_margin_pct') is not None else "N/A"
+                op_margin_disp = f"{fundamentals.get('operating_margin_pct'):.1f}%" if fundamentals.get('operating_margin_pct') is not None else "N/A"
+                st.metric("YoY Revenue Growth", rev_growth_disp, help="Year-over-Year revenue growth rate")
+                st.caption(f"Gross: **{gross_margin_disp}** | Op: **{op_margin_disp}**")
+            with fcol4:
+                rule_40_disp = fundamentals.get('rule_of_40_badge', 'N/A')
+                fcf_yield_disp = f"{fundamentals.get('fcf_yield_pct'):.1f}%" if fundamentals.get('fcf_yield_pct') is not None else "N/A"
+                st.metric("SaaS / Tech Rule of 40", rule_40_disp, help="YoY Revenue Growth % + FCF Margin % (Standard for SaaS / tech efficiency: >= 40%)")
+                st.caption(f"Free Cash Flow Yield: **{fcf_yield_disp}**")
+
+        # ----------------- SECTION B: MARGIN OF SAFETY VS WALL STREET CONSENSUS -----------------
+        target_mean = fundamentals.get('target_mean_price')
+        target_high = fundamentals.get('target_high_price')
+        target_low = fundamentals.get('target_low_price')
+        analyst_count = fundamentals.get('analyst_count')
+        analyst_recom = fundamentals.get('recommendation', 'N/A')
+        
+        if target_mean and target_mean > 0:
+            with st.container(border=True):
+                st.markdown(f"### 🎯 Margin of Safety & Wall Street Consensus Target (`{symbol}`)")
+                
+                # Calculate upside metrics
+                spot_upside = ((target_mean - curr_price) / curr_price) * 100.0
+                
+                # Find best contract breakeven for comparison
+                best_be = min([r['breakeven_price'] for r in results]) if results else (curr_price * 0.95)
+                be_upside = ((target_mean - best_be) / best_be) * 100.0
+                alpha_buffer = be_upside - spot_upside
+
+                m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                with m_col1:
+                    st.metric("Wall Street Mean Target", f"${target_mean:.2f}", f"{spot_upside:+.1f}% vs Spot")
+                    st.caption(f"Range: **${target_low:.2f} - ${target_high:.2f}**" if (target_low and target_high) else "Consensus Target")
+                with m_col2:
+                    st.metric("Consensus Rating", analyst_recom, f"{analyst_count or 'Multiple'} Analysts")
+                    st.caption("Sell-side consensus recommendation")
+                with m_col3:
+                    st.metric("Option Downside Breakeven", f"${best_be:.2f}", f"-{((curr_price - best_be)/curr_price*100):.1f}% Buffer")
+                    st.caption("Lowest breakeven across screened contracts")
+                with m_col4:
+                    st.metric("Breakeven Target Upside", f"{be_upside:+.1f}%", f"+{alpha_buffer:.1f}% Overlay Alpha")
+                    st.caption("Upside to consensus target from breakeven")
+
+                st.info(f"💡 **Institutional Margin of Safety**: Writing an OTM covered call establishes downside breakeven at **`${best_be:.2f}`**, creating **{be_upside:+.1f}% upside to Wall Street consensus fair value** vs. `{spot_upside:+.1f}%` on naked stock.")
+
         st.markdown("---")
         st.subheader(f"Option Chains & Yield Matrix for {symbol}")
         
@@ -548,9 +620,21 @@ with tab_live:
                     axis=1
                 )
             
+            # Format Expected Move & Cushion Coverage if available
+            if 'expected_move_pct' in df.columns:
+                df['expected_move_disp'] = df['expected_move_pct'].apply(lambda v: f"±{v:.1f}%" if pd.notna(v) else "N/A")
+            else:
+                df['expected_move_disp'] = "N/A"
+                
+            if 'implied_move_badge' not in df.columns:
+                df['implied_move_badge'] = df.apply(
+                    lambda r: calculate_earnings_implied_move(curr_price, r.get('implied_volatility_pct'), r.get('cushion_pct'), r.get('days_to_earnings')).get('badge', 'N/A'),
+                    axis=1
+                )
+            
             cols_to_include = [
                 'term', 'expiration_date', 'target_type', 'strike_price', 'premium', 'premium_roi_pct',
-                'ann_max_roi_pct', 'cushion_pct', 'earnings_badge_short', 'implied_volatility_pct', 'delta', 'prob_itm_pct', 'prob_touch_pct',
+                'ann_max_roi_pct', 'cushion_pct', 'earnings_badge_short', 'expected_move_disp', 'implied_move_badge', 'implied_volatility_pct', 'delta', 'prob_itm_pct', 'prob_touch_pct',
                 'ann_premium_roi_pct', 'max_roi_pct', 'score', 'breakeven_price'
             ]
             existing_cols = [c for c in cols_to_include if c in df.columns]
@@ -566,6 +650,8 @@ with tab_live:
                 'ann_max_roi_pct': 'Ann. Max ROI (%)',
                 'cushion_pct': 'Cushion (%)',
                 'earnings_badge_short': 'Earnings Catalyst',
+                'expected_move_disp': '1-Day Implied Move',
+                'implied_move_badge': 'Cushion Coverage',
                 'implied_volatility_pct': 'IV (%)',
                 'delta': 'Delta',
                 'prob_itm_pct': 'Prob. ITM (%)',
@@ -579,9 +665,54 @@ with tab_live:
 
             st.dataframe(display_df, width="stretch", hide_index=True)
 
+            # ----------------- SECTION C: 1-PAGE INSTITUTIONAL PITCH TEAR SHEET -----------------
+            st.markdown("---")
+            st.subheader(f"📄 1-Page Institutional Investment Pitch Tear Sheet ({symbol})")
+            st.caption("Printable, publication-ready equity research summary for investment committees, buy-side analysts, and portfolio managers.")
+
+            with st.expander("🔍 Generate & View 1-Page Institutional Pitch Tear Sheet", expanded=True):
+                # Contract Selector for Tear Sheet
+                contract_options = [f"{r['term']} - {r['target_type']} Strike (${r['strike_price']:.2f}) [Ann. ROI: {r['ann_max_roi_pct']:.1f}%]" for r in results]
+                selected_idx = st.selectbox(
+                    "Select Option Contract Structure to Pitch:",
+                    range(len(contract_options)),
+                    format_func=lambda i: contract_options[i],
+                    key=f"tearsheet_contract_select_{symbol}"
+                )
+                
+                selected_contract = results[selected_idx]
+                tearsheet_md = generate_pitch_tear_sheet(
+                    symbol=symbol,
+                    stock_price=curr_price,
+                    fundamentals=fundamentals,
+                    option_row=selected_contract,
+                    subsector=subsector_name,
+                    ref_price=ref_price
+                )
+
+                tcol_btn1, tcol_btn2 = st.columns([1, 1])
+                with tcol_btn1:
+                    st.download_button(
+                        label="📥 Download Pitch Tear Sheet (.md)",
+                        data=tearsheet_md,
+                        file_name=f"{symbol}_Covered_Call_Tear_Sheet.md",
+                        mime="text/markdown",
+                        key=f"btn_dl_tearsheet_{symbol}"
+                    )
+                with tcol_btn2:
+                    st.caption("💡 Open in markdown viewer, copy into Notion/Word, or print to PDF for pitch meetings.")
+
+                # Rendered Tear Sheet Preview
+                with st.container(border=True):
+                    st.markdown(tearsheet_md)
+
+                with st.expander("📋 View Raw Markdown Code (Click to Copy)", expanded=False):
+                    st.text_area("Markdown Code", value=tearsheet_md, height=250, key=f"raw_tearsheet_code_{symbol}")
+
             # Email Delivery for Single Ticker Option Matrix
+            st.markdown("---")
             with st.container(border=True):
-                st.markdown(f"**📧 Email Me This `{symbol}` Option Matrix & Strategy Report**")
+                st.markdown(f"**📧 Email Me This `{symbol}` Option Matrix & Tear Sheet Report**")
                 col_t2_em1, col_t2_em2 = st.columns([3, 1])
                 with col_t2_em1:
                     t2_email = st.text_input("Enter your email to receive this full report & yield table", placeholder="trader@example.com", key=f"t2_email_{symbol}")
@@ -593,7 +724,7 @@ with tab_live:
                     if t2_email and "@" in t2_email and "." in t2_email:
                         saved = save_subscriber(t2_email, "", f"{symbol} Option Matrix")
                         if saved:
-                            st.success(f"✅ **Sent!** Option analysis for **{symbol}** has been queued for **{t2_email.strip()}**.")
+                            st.success(f"✅ **Sent!** Option analysis and tear sheet for **{symbol}** has been queued for **{t2_email.strip()}**.")
                         else:
                             st.error("Could not save email. Please try again.")
                     else:
@@ -719,23 +850,41 @@ with tab_methodology:
 
     ---
 
-    ### 3. TMC Sector Dynamics for Buy-Side Equity Research
-    The platform incorporates Technology, Media, and Telecommunications (TMC) sub-industry taxonomy:
-    - **⚡ Semiconductors & AI Hardware** (*NVDA, TSM, AMD, AVGO*): High capital intensity, cyclical demand, higher Implied Volatility. Demands wider downside cushions ($\ge 5\%$).
-    - **☁️ Enterprise SaaS & Cloud Infrastructure** (*MSFT, CRM, NOW, ADBE*): Recurring ARR business models, sticky retention, lower beta. Ideal for steady annualized premium generation ($12\% - 20\%$).
-    - **📺 Digital Media & Ad-Tech** (*GOOGL, META, NFLX, SPOT*): Macro ad-spending sensitivity, high cash conversion.
-    - **📡 Telecom & Digital Infrastructure** (*T, VZ, TMUS, AMT, EQIX*): High asset backing, utility-like dividend yields, lower option IV.
+    ### 3. SaaS / Tech "Rule of 40" Efficiency Standard
+    In institutional equity research, enterprise SaaS and tech businesses are evaluated on a balanced growth-profitability trade-off:
+    $$\text{Rule of 40 Score} = (\text{YoY Revenue Growth \%}) + (\text{Free Cash Flow Margin \%})$$
+    - **$\ge 40\%$ (Elite)**: Company efficiently balances top-line scale with cash generation (e.g. MSFT, NOW, PANW).
+    - **$20\% - 40\%$ (Balanced)**: Moderate efficiency or reinvestment phase.
+    - **$< 20\%$ (Sub-scale)**: Company requires margin expansion or higher growth efficiency to justify elevated multiples.
 
     ---
 
-    ### 4. Black-Scholes Call Delta ($\Delta = N(d_1)$)
+    ### 4. Earnings 1-Day Implied Move & Option Cushion Coverage
+    Market-implied 1-day volatility swings for earnings catalysts are calculated from front-month Implied Volatility (IV):
+    $$\text{Expected 1-Day Move \%} \approx \text{IV} \times \sqrt{\frac{1}{365}} \times 100 \approx \text{IV} \times 5.23\%$$
+    $$\text{Cushion Coverage Ratio} = \frac{\text{Covered Call Downside Cushion \%}}{\text{Expected 1-Day Move \%}}$$
+    - **$\ge 1.0\text{x}$ (Protected)**: Option premium buffer covers the expected 1-day earnings swing.
+    - **$< 1.0\text{x}$ (Tail Risk)**: Expected binary swing exceeds option premium cushion; tail risk requires active position sizing.
+
+    ---
+
+    ### 5. Margin of Safety & Consensus Fair Value Overlay Alpha
+    When overlaying a covered call on core equity holdings:
+    $$\text{Downside Breakeven} = \text{Spot Price} - \text{Option Premium}$$
+    $$\text{Breakeven Target Upside \%} = \frac{\text{Wall Street Consensus Target} - \text{Breakeven}}{\text{Breakeven}} \times 100$$
+    $$\text{Overlay Alpha Buffer} = \text{Breakeven Target Upside \%} - \text{Spot Target Upside \%}$$
+    Collecting upfront option premium lowers the entry basis, widening the margin of safety to consensus fair value.
+
+    ---
+
+    ### 6. Black-Scholes Call Delta ($\Delta = N(d_1)$)
     The Black-Scholes Delta measures the rate of change of option value per \$1 move in the underlying stock price:
     $$d_1 = \frac{\ln(S / K) + (r + \frac{1}{2}\sigma^2)T}{\sigma \sqrt{T}}$$
     $$\Delta_{\text{call}} = N(d_1) = \frac{1}{2} \left[ 1 + \text{erf}\left(\frac{d_1}{\sqrt{2}}\right) \right]$$
 
     ---
 
-    ### 5. Black-Scholes In-The-Money Probability ($N(d_2)$)
+    ### 7. Black-Scholes In-The-Money Probability ($N(d_2)$)
     The probability that an Out-of-the-Money call option expires In-The-Money (ITM) under risk-neutral Black-Scholes dynamics is given by $N(d_2)$:
     $$d_2 = d_1 - \sigma \sqrt{T} = \frac{\ln(S / K) + (r - \frac{1}{2}\sigma^2)T}{\sigma \sqrt{T}}$$
     $$\text{Prob. ITM} = N(d_2) = \frac{1}{2} \left[ 1 + \text{erf}\left(\frac{d_2}{\sqrt{2}}\right) \right]$$
@@ -748,13 +897,13 @@ with tab_methodology:
 
     ---
 
-    ### 6. Probability of Touching / Hitting Strike Price
+    ### 8. Probability of Touching / Hitting Strike Price
     By the **Reflection Principle** of Brownian motion with drift, the probability that the underlying stock price touches or exceeds the strike price $K$ at *any point* prior to expiration is approximately:
     $$\text{Prob. Hit Strike} \approx \min\left(100\%, 2 \times N(d_2)\right)$$
 
     ---
 
-    ### 7. Covered Call Yield & ROI Metrics
+    ### 9. Covered Call Yield & ROI Metrics
     - **Premium Yield (%)**: $\frac{\text{Option Premium}}{\text{Reference Price}} \times 100$
     - **Annualized Premium Yield (%)**: $\text{Premium Yield} \times \frac{365}{\text{DTE}}$
     - **Max ROI (%)**: $\frac{(K - \text{Reference Price}) + \text{Option Premium}}{\text{Reference Price}} \times 100$
@@ -762,3 +911,4 @@ with tab_methodology:
     - **Downside Breakeven Price ($)**: $\text{Reference Price} - \text{Option Premium}$
     - **Downside Cushion (%)**: $\frac{\text{Option Premium}}{\text{Reference Price}} \times 100$
     """)
+

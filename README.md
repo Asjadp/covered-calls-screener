@@ -42,8 +42,20 @@ graph TD
 
 ## ✨ Key Features
 
-- **Dynamic Ticker & Company Name Resolution**: Search by ticker (e.g. `AAPL`, `NVDA`, `TSLA`, `SPY`) or plain English company names (e.g. `Apple`, `Microsoft`, `Nvidia`).
+- **Dynamic Ticker & Company Name Resolution**: Search by ticker (e.g. `AAPL`, `NVDA`, `TSLA`, `SPY`, `CRM`, `PLTR`) or plain English company names (e.g. `Apple`, `Microsoft`, `Nvidia`, `Salesforce`).
 - **Target Expirations & OTM Strikes**: Dynamically scans ~60-day (~2-month) and ~90-day (~3-month) expiration cycles targeting **+5% OTM** and **+10% OTM** strikes.
+- **Fundamental Valuation & SaaS Scorecard**:
+  - **Valuation Multiples**: Forward P/E, Trailing P/E, EV / NTM EBITDA, and EV / Sales.
+  - **SaaS "Rule of 40"**: Quantitative calculation of `(YoY Rev Growth % + FCF Margin %)` evaluating business quality ($\ge 40\%$ Elite SaaS benchmark).
+  - **Cash Flow Conversion**: Free Cash Flow (FCF) Yield % vs. Option Yield comparison.
+- **Margin of Safety vs. Wall Street Consensus Target**:
+  - Compares Option Downside Breakeven (`Spot Price - Premium`) against Wall Street Consensus Price Targets (Mean, High, Low) to calculate Overlay Alpha buffer.
+- **Earnings Implied Move & Event Volatility Crush**:
+  - Models 1-day market-implied earnings swing: $\text{Expected Move \%} \approx \text{IV} \times \sqrt{1/365} \approx \text{IV} \times 5.23\%$.
+  - Compares Option Downside Cushion % against Expected Move % (`🛡️ Protected` vs `⚠️ Tail Risk`).
+- **1-Page Institutional Equity Research Pitch Tear Sheet**:
+  - Generates publication-ready, printable investment memos combining equity thesis, valuation scorecard, option structure, and downside risk scenarios.
+  - 1-click Markdown download and clipboard copy for pitch books and investment committee reviews.
 - **Quantitative Greeks & Probabilities (Black-Scholes)**:
   - **Implied Volatility (`IV %`) & Delta**: Real-time contract volatility and price sensitivity.
   - **$\text{Prob. ITM (\%)} = N(d_2)$**: Probability the option expires in-the-money.
@@ -57,7 +69,7 @@ graph TD
   - Supports **Local SQLite** (`covered_calls.db`) for zero-config local testing.
   - Supports **Cloud PostgreSQL (Supabase / Neon)** via `DATABASE_URL` secrets for permanent cloud data storage across container restarts.
 - **Automated Data Testing & Benchmark Datasets**:
-  - Includes `test_data_pipeline.py` which validates API integrity, checks mathematical formulas, screens benchmark portfolios, and exports sample datasets (`data/sample_options_dataset.csv` and `.json`).
+  - Includes `test_data_pipeline.py`, `test_tmc_pipeline.py`, and `test_fundamental_features.py` validating API integrity, mathematical formulas, and tear sheet output.
 
 ---
 
